@@ -1,0 +1,144 @@
+{
+  "model_version": "v1",
+  "training_date": "2026-08-17T05:28:58.007923+00:00",
+  "question": "Saat sebuah PART rusak, apakah kerusakan itu berakhir dibuang?",
+  "selected_model": "Gabungan LogReg + RF",
+  "selection_rule": "model ditetapkan di muka, bukan dipilih dari data - fold pemeriksaan terlalu sedikit kejadiannya",
+  "training_period": {
+    "era_start": "2025-04-01",
+    "embargo_days": 30,
+    "onset_from": "2025-04-01 11:44:41",
+    "onset_to": "2026-07-04 10:27:10.276000",
+    "test_start": "2026-04-01"
+  },
+  "target": "vonis UNREPAIRABLE atau BROKEN setelah kerusakan",
+  "features": [
+    "item_type_category",
+    "log_age_total",
+    "log_cycle_age",
+    "log_prior_repaired_count",
+    "has_prior_repair",
+    "log_prior_failure_count",
+    "is_first_failure_ever"
+  ],
+  "categorical_features": [
+    "item_type_category"
+  ],
+  "known_item_types": [
+    "BARCODE SCANNER",
+    "CARD SLOT",
+    "CASH DISPENSER",
+    "MODULE BILL ACCEPTOR",
+    "MODULE READER",
+    "MOTOR",
+    "PC",
+    "PRINTER",
+    "UPS"
+  ],
+  "risk_cutoffs": {
+    "high": 0.03469406727905062,
+    "medium": 0.03237358770918705
+  },
+  "cutoff_basis": {
+    "rule": "kapasitas kerja per bulan yang ditetapkan bisnis",
+    "scale": "probabilitas terkalibrasi",
+    "capacity_per_month": 3,
+    "failures_per_month_in_training": 90.7,
+    "flagged_share_high": 0.0331
+  },
+  "rows": {
+    "total": 1407,
+    "scrap": 46
+  },
+  "model_comparison": [
+    {
+      "model": "Selalu 'bisa diperbaiki'",
+      "rolling_roc": 0.5,
+      "rolling_pr": 0.013196791783951852,
+      "test_roc_auc": 0.5,
+      "test_pr_auc": 0.06501547987616099
+    },
+    {
+      "model": "Regresi Logistik",
+      "rolling_roc": 0.55448199599143,
+      "rolling_pr": 0.038055863021817675,
+      "test_roc_auc": 0.7253232418795332,
+      "test_pr_auc": 0.23242464111365901
+    },
+    {
+      "model": "Random Forest",
+      "rolling_roc": 0.8557916925841453,
+      "rolling_pr": 0.07058865720731217,
+      "test_roc_auc": 0.794465468306528,
+      "test_pr_auc": 0.21222521743844788
+    },
+    {
+      "model": "Extra Trees",
+      "rolling_roc": 0.6229473356831847,
+      "rolling_pr": 0.050495365229108184,
+      "test_roc_auc": 0.662251655629139,
+      "test_pr_auc": 0.22408532106493825
+    },
+    {
+      "model": "Gradient Boosting",
+      "rolling_roc": 0.8650844045891215,
+      "rolling_pr": 0.07237021550133815,
+      "test_roc_auc": 0.7286345001576789,
+      "test_pr_auc": 0.1331170431183698
+    },
+    {
+      "model": "Gabungan LogReg + RF",
+      "rolling_roc": 0.7082391664938835,
+      "rolling_pr": 0.04493366769283619,
+      "test_roc_auc": 0.7623777988016398,
+      "test_pr_auc": 0.2545603159954305
+    }
+  ],
+  "evaluation_metrics": {
+    "rows": 323,
+    "positives": 21,
+    "roc_auc": 0.7623777988016398,
+    "pr_auc": 0.2545603159954305,
+    "pr_auc_baseline": 0.06501547987616099,
+    "accuracy": 0.9256965944272446,
+    "balanced_accuracy": 0.6722642699463892,
+    "precision": 0.42105263157894735,
+    "recall": 0.38095238095238093,
+    "confusion_matrix": [
+      [
+        291,
+        11
+      ],
+      [
+        13,
+        8
+      ]
+    ],
+    "bootstrap_ci_95": {
+      "n_boot": 1000,
+      "n_boot_valid": 1000,
+      "roc_auc": [
+        0.6682,
+        0.8511
+      ],
+      "pr_auc": [
+        0.1216,
+        0.4692
+      ],
+      "precision_at_capacity": [
+        0.1111,
+        0.7778
+      ],
+      "recall_at_capacity": [
+        0.0476,
+        0.3529
+      ]
+    }
+  },
+  "limitations": [
+    "Kejadian scrap sedikit - metrik uji berisik dan rentang ketidakpastiannya lebar.",
+    "Kerusakan tanpa vonis DAN tidak pernah dipasang lagi tidak bisa dilabeli, jadi tidak dipelajari.",
+    "Base rate masih naik antar-kuartal; peringkat risiko lebih bisa dipercaya daripada probabilitas absolut.",
+    "Jenis PART di luar known_item_types masuk kelompok LOW_SUPPORT dan cenderung diberi risiko tinggi."
+  ]
+}

@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+catboost_info/
+.pytest_cache/
+.cache/
+models/survival/v*/*.joblib
+.baseline/

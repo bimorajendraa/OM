@@ -1,0 +1,18 @@
+# Dependensi lapisan serving (API + dashboard).
+#
+# Terpisah dari requirements.txt supaya mesin yang hanya menjalankan training
+# tidak perlu memasang FastAPI dan Streamlit.
+-r requirements.txt
+
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+streamlit>=1.38,<2
+requests>=2.32,<3
+
+# Connection pool database untuk API (lihat api/services/db_pool.py) - bukan
+# dipakai predict.py/train.py, yang tetap memanggil psycopg.connect() langsung.
+psycopg-pool>=3.2,<4
+
+# Dipakai test (fastapi.testclient) dan menjalankan test itu sendiri.
+httpx>=0.27,<1
+pytest>=8.0,<9

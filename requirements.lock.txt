@@ -1,0 +1,97 @@
+# Snapshot versi PERSIS dari environment yang sudah diverifikasi jalan (lihat
+# tests/ - 124 test lulus dengan environment ini). requirements.txt dan
+# requirements-serving.txt sengaja memakai rentang versi (>=x,<y) supaya
+# fleksibel; file ini untuk deployment yang butuh reproduksi PERSIS environment
+# yang sama, mis. container production atau debugging "jalan di laptop saya".
+#
+# Dibuat lewat: pip freeze > requirements.lock.txt
+# Dipasang lewat: pip install -r requirements.lock.txt
+#
+# Perbarui setelah menguji kombinasi versi baru dan seluruh test lulus -
+# jangan diedit manual.
+#
+# Python yang dipakai membuat snapshot ini: 3.13.3
+#
+# PENGECUALIAN dari `pip freeze` murni: scikit-survival==0.28.0 SENGAJA
+# TIDAK dicantumkan di sini walau dipakai runtime (predict/survival.py,
+# field advisory mode aditif - lihat gate_decision.md G7). Dependensinya
+# `ecos` tidak punya wheel py3.13 dan image tidak punya gcc untuk build
+# dari source; ecos sendiri cuma dipakai SurvivalSVM yang tidak dipakai
+# proyek ini. Dockerfile memasangnya di RUN terpisah dengan --no-deps
+# SETELAH baris di bawah (numexpr/osqp/dst di sini adalah dependensi
+# riilnya yang memang punya wheel).
+
+altair==6.2.2
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+attrs==26.1.0
+blinker==1.9.0
+catboost==1.2.10
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.4.2
+colorama==0.4.6
+contourpy==1.3.3
+cycler==0.12.1
+fastapi==0.141.1
+fonttools==4.63.0
+graphviz==0.21
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.18
+iniconfig==2.3.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+joblib==1.5.3
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+kiwisolver==1.5.0
+MarkupSafe==3.0.3
+matplotlib==3.11.1
+narwhals==2.24.0
+numexpr==2.14.2
+numpy==2.5.2
+osqp==1.1.3
+packaging==26.3
+pandas==2.3.3
+pillow==12.3.0
+plotly==6.9.0
+pluggy==1.6.0
+protobuf==7.35.1
+psycopg==3.3.4
+psycopg-binary==3.3.4
+psycopg-pool==3.3.1
+pyarrow==24.0.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+pydeck==0.9.3
+Pygments==2.21.0
+pyparsing==3.3.2
+pytest==8.4.2
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+pytz==2026.3.post1
+PyYAML==6.0.3
+referencing==0.37.0
+requests==2.34.2
+rpds-py==2026.6.3
+scikit-learn==1.9.0
+scipy==1.18.0
+six==1.17.0
+starlette==1.3.1
+streamlit==1.61.1
+tenacity==9.1.4
+threadpoolctl==3.6.0
+toml==0.10.2
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.3
+urllib3==2.7.0
+uvicorn==0.52.3
+watchdog==6.0.0
+watchfiles==1.2.0
+websockets==16.1.1

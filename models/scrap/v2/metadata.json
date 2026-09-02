@@ -1,0 +1,148 @@
+{
+  "model_version": "v2",
+  "training_date": "2026-08-28T02:04:29.668021+00:00",
+  "question": "Saat sebuah PART rusak, apakah kerusakan itu berakhir dibuang?",
+  "selected_model": "Gabungan LogReg + RF",
+  "selection_rule": "model ditetapkan di muka, bukan dipilih dari data - fold pemeriksaan terlalu sedikit kejadiannya",
+  "training_period": {
+    "era_start": "2025-04-01",
+    "embargo_days": 30,
+    "onset_from": "2025-04-01 11:44:41",
+    "onset_to": "2026-07-28 12:24:52.834000",
+    "test_start": "2026-04-01"
+  },
+  "target": "vonis UNREPAIRABLE atau BROKEN setelah kerusakan",
+  "features": [
+    "item_type_category",
+    "log_age_total",
+    "log_cycle_age",
+    "log_prior_repaired_count",
+    "has_prior_repair",
+    "log_prior_failure_count",
+    "is_first_failure_ever"
+  ],
+  "categorical_features": [
+    "item_type_category"
+  ],
+  "known_item_types": [
+    "BARCODE SCANNER",
+    "CARD SLOT",
+    "CASH DISPENSER",
+    "MODULE BILL ACCEPTOR",
+    "MODULE READER",
+    "MOTOR",
+    "PC",
+    "PRINTER",
+    "UPS"
+  ],
+  "risk_cutoffs": {
+    "high": 0.03390406268450003,
+    "medium": 0.031305413358873685
+  },
+  "cutoff_basis": {
+    "rule": "kapasitas kerja per bulan yang ditetapkan bisnis",
+    "scale": "probabilitas terkalibrasi",
+    "capacity_per_month": 3,
+    "failures_per_month_in_training": 91.4,
+    "flagged_share_high": 0.0328
+  },
+  "rows": {
+    "total": 1582,
+    "scrap": 53
+  },
+  "model_comparison": [
+    {
+      "model": "Selalu 'bisa diperbaiki'",
+      "rolling_roc": 0.5,
+      "rolling_pr": 0.012905040504050405,
+      "test_roc_auc": 0.5,
+      "test_pr_auc": 0.05725971370143149
+    },
+    {
+      "model": "Regresi Logistik",
+      "rolling_roc": 0.6585252391949851,
+      "rolling_pr": 0.0548850105092791,
+      "test_roc_auc": 0.7060737527114967,
+      "test_pr_auc": 0.20113396529707903
+    },
+    {
+      "model": "Random Forest",
+      "rolling_roc": 0.8677222863741338,
+      "rolling_pr": 0.07654998885080971,
+      "test_roc_auc": 0.8041137279206694,
+      "test_pr_auc": 0.22923087742535092
+    },
+    {
+      "model": "Extra Trees",
+      "rolling_roc": 0.6501121741999341,
+      "rolling_pr": 0.05521929260645364,
+      "test_roc_auc": 0.6746978617911373,
+      "test_pr_auc": 0.23772799318854027
+    },
+    {
+      "model": "Gradient Boosting",
+      "rolling_roc": 0.8473053447707027,
+      "rolling_pr": 0.07555932743121177,
+      "test_roc_auc": 0.6819801673380849,
+      "test_pr_auc": 0.11364452262699162
+    },
+    {
+      "model": "Gabungan LogReg + RF",
+      "rolling_roc": 0.8081346915209502,
+      "rolling_pr": 0.06744793252173104,
+      "test_roc_auc": 0.7630926557173845,
+      "test_pr_auc": 0.2595579917851504
+    }
+  ],
+  "evaluation_metrics": {
+    "rows": 489,
+    "positives": 28,
+    "roc_auc": 0.7630926557173845,
+    "pr_auc": 0.2595579917851504,
+    "pr_auc_baseline": 0.05725971370143149,
+    "accuracy": 0.9325153374233128,
+    "balanced_accuracy": 0.6455299039355439,
+    "precision": 0.391304347826087,
+    "recall": 0.32142857142857145,
+    "confusion_matrix": [
+      [
+        447,
+        14
+      ],
+      [
+        19,
+        9
+      ]
+    ]
+  },
+  "promotion_comparison": {
+    "candidate": {
+      "rows": 489,
+      "positives": 28,
+      "roc_auc": 0.7630926557173845,
+      "pr_auc": 0.2595579917851504,
+      "brier_calibrated": 0.05454826681203802,
+      "capacity_evaluated": 12,
+      "precision_at_capacity": 0.4166666666666667,
+      "recall_at_capacity": 0.17857142857142858
+    },
+    "incumbent": {
+      "rows": 489,
+      "positives": 28,
+      "roc_auc": 0.754880694143167,
+      "pr_auc": 0.2593228958296091,
+      "brier_calibrated": 0.05448516344390356,
+      "capacity_evaluated": 12,
+      "precision_at_capacity": 0.4166666666666667,
+      "recall_at_capacity": 0.17857142857142858
+    },
+    "incumbent_version": "v1",
+    "decisive_split": "TEST"
+  },
+  "limitations": [
+    "Kejadian scrap sedikit - metrik uji berisik dan rentang ketidakpastiannya lebar.",
+    "Kerusakan tanpa vonis DAN tidak pernah dipasang lagi tidak bisa dilabeli, jadi tidak dipelajari.",
+    "Base rate masih naik antar-kuartal; peringkat risiko lebih bisa dipercaya daripada probabilitas absolut.",
+    "Jenis PART di luar known_item_types masuk kelompok LOW_SUPPORT dan cenderung diberi risiko tinggi."
+  ]
+}

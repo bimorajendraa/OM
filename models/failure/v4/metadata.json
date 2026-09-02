@@ -1,0 +1,271 @@
+{
+  "model_version": "v4",
+  "training_date": "2026-08-22T08:34:17.305376+00:00",
+  "fleet_snapshot_at": "2026-08-03 11:07:22",
+  "training_period": {
+    "observation_from": "2013-01-01 21:00:00",
+    "observation_to": "2026-07-31 17:14:44",
+    "dataset_max_event_on": "2026-08-03 11:07:22",
+    "rows_by_split": {
+      "TRAIN": 251568,
+      "VALIDATION": 49660,
+      "TEST": 38451,
+      "EXCLUDED_EMBARGO": 8650,
+      "EXCLUDED_TOO_OLD": 7771
+    }
+  },
+  "target": "PART mengalami kerusakan dalam 30 hari setelah tanggal observasi",
+  "features": [
+    "part_model_category",
+    "client_category",
+    "installation_age_band",
+    "log_days_since_installation",
+    "log_total_prior_events",
+    "log_prior_failure_count",
+    "has_prior_failure",
+    "log_prior_corrective_count",
+    "has_prior_corrective",
+    "log_days_since_last_corrective",
+    "log_prior_distinct_places",
+    "log_prior_corrective_30d",
+    "log_prior_failure_365d",
+    "log_prior_events_180d",
+    "log_previous_cycle_lifetime_mean",
+    "has_previous_cycle",
+    "month_sin",
+    "month_cos",
+    "log_model_failures_90d",
+    "model_failure_rate_90d",
+    "log_model_fleet_size",
+    "log_cumulative_prior_cycle_days",
+    "log_previous_cycle_count",
+    "has_failure_interval_trend",
+    "log_failure_interval_mean_days",
+    "failure_interval_trend_ratio",
+    "log_prior_corrective_60d",
+    "log_prior_corrective_90d",
+    "log_item_type_failures_90d",
+    "item_type_failure_rate_90d",
+    "log_item_type_failures_180d",
+    "item_type_failure_rate_180d"
+  ],
+  "categorical_features": [
+    "part_model_category",
+    "client_category",
+    "installation_age_band"
+  ],
+  "hyperparameters": {
+    "iterations": 200,
+    "depth": 4,
+    "learning_rate": 0.03,
+    "l2_leaf_reg": 10,
+    "loss_function": "Logloss",
+    "eval_metric": "AUC",
+    "auto_class_weights": "Balanced",
+    "use_best_model": false,
+    "verbose": false,
+    "thread_count": 1,
+    "random_seed": 42
+  },
+  "evaluation_metrics": {
+    "train": {
+      "rows": 251568,
+      "positives": 3852,
+      "roc_auc": 0.8632588418130722,
+      "pr_auc": 0.1334607456546544
+    },
+    "validation": {
+      "rows": 49660,
+      "positives": 947,
+      "roc_auc": 0.8169927513934113,
+      "pr_auc": 0.11157105941104908
+    },
+    "test": {
+      "rows": 38451,
+      "positives": 902,
+      "roc_auc": 0.8318627149069191,
+      "pr_auc": 0.19611317604444856,
+      "brier_raw": 0.19293127586048578,
+      "brier_calibrated": 0.02097420068039115,
+      "bootstrap_ci_95": {
+        "n_boot": 1000,
+        "n_boot_valid": 1000,
+        "roc_auc": [
+          0.8193,
+          0.843
+        ],
+        "pr_auc": [
+          0.169,
+          0.225
+        ],
+        "precision_at_capacity": [
+          0.1947,
+          0.2388
+        ],
+        "recall_at_capacity": [
+          0.3091,
+          0.3675
+        ]
+      }
+    }
+  },
+  "validation_base_rate": 0.019069673781715667,
+  "risk_cutoffs": {
+    "high": 0.25,
+    "medium": 0.15
+  },
+  "cutoff_basis": {
+    "rule": "ambang probabilitas 30-hari tetap",
+    "scale": "probabilitas kerusakan 30 hari terkalibrasi - sama seperti yang ditampilkan ke pengguna",
+    "active_parts_scored": 16877,
+    "flagged_high": 27,
+    "flagged_medium_band": 57
+  },
+  "part_model_support": {
+    "0120201": 278797,
+    "0120202": 26694,
+    "0120204": 30409,
+    "0120401": 20417,
+    "0120701": 13972,
+    "0120702": 139,
+    "0120801": 14086,
+    "0120901": 11850,
+    "0121101": 114478,
+    "0121103": 119346,
+    "0121401": 21624,
+    "0121408": 144,
+    "0121602": 12870,
+    "0121603": 6807,
+    "0121701": 13352,
+    "0220402": 6030,
+    "0220601": 13585,
+    "0220602": 12513,
+    "0220603": 506,
+    "0221601": 5852,
+    "0320203": 7960,
+    "0321301": 14788,
+    "0321302": 14791,
+    "0321501": 119020,
+    "0420501": 39184,
+    "0420502": 56575,
+    "0420503": 8706,
+    "0420504": 14126,
+    "0420506": 636,
+    "0420510": 795,
+    "0521102": 14802,
+    "0521104": 1310,
+    "0521201": 109282,
+    "0521202": 2977,
+    "0521203": 12732,
+    "0521204": 1162,
+    "0620302": 69602,
+    "0620307": 282,
+    "0620308": 36,
+    "0620505": 18698,
+    "0620512": 60,
+    "0620517": 146,
+    "0720301": 92542,
+    "0721001": 16085,
+    "0820303": 2172,
+    "0820507": 1298,
+    "0820604": 143,
+    "0820605": 1297,
+    "0820607": 108,
+    "0821901": 1296,
+    "0921604": 1307,
+    "0921610": 30,
+    "1020206": 176,
+    "1020511": 31,
+    "1020513": 121,
+    "1020514": 75,
+    "1020515": 15,
+    "1020516": 16,
+    "1020606": 78,
+    "1020608": 15,
+    "1020609": 75,
+    "1020610": 75,
+    "1021402": 1435,
+    "1021406": 31,
+    "1021407": 16,
+    "1021902": 93,
+    "1122001": 11796,
+    "1420511": 2290,
+    "1520512": 20599,
+    "1521403": 8661,
+    "1521405": 12637,
+    "1620205": 60,
+    "1920611": 144,
+    "1921105": 72,
+    "1921205": 84,
+    "1921303": 72
+  },
+  "promotion_comparison": {
+    "candidate": {
+      "rows": 38451,
+      "positives": 902,
+      "roc_auc": 0.8314923193634524,
+      "pr_auc": 0.19585008600297785,
+      "brier_calibrated": 0.02097635392111921,
+      "capacity_evaluated": 1407,
+      "precision_at_capacity": 0.21748400852878466,
+      "recall_at_capacity": 0.3392461197339246
+    },
+    "incumbent": {
+      "rows": 38451,
+      "positives": 902,
+      "roc_auc": 0.8238530773595525,
+      "pr_auc": 0.188094517561271,
+      "brier_calibrated": 0.021135432850639867,
+      "capacity_evaluated": 1407,
+      "precision_at_capacity": 0.21677327647476902,
+      "recall_at_capacity": 0.33813747228381374
+    },
+    "incumbent_version": "v3"
+  },
+  "gate": {
+    "horizon_days": 30,
+    "target_precision": 0.4,
+    "feasible": true,
+    "threshold": 0.375,
+    "threshold_basis": "sklearn.precision_recall_curve pada VALIDATION, recall dimaksimalkan dengan syarat presisi >= target_precision, diuji SEKALI di TEST - lihat docs/EXPERIMENTS.md E-46/E-47/E-48",
+    "validation_metrics": {
+      "precision": 0.4230769230769231,
+      "recall": 0.011615628299894404,
+      "alerts": 26
+    },
+    "test_metrics": {
+      "threshold": 0.375,
+      "alerts": 8,
+      "true_positive": 5,
+      "false_positive": 3,
+      "precision": 0.625,
+      "recall": 0.005543237250554324,
+      "positives": 902,
+      "rows": 38451
+    },
+    "lifecycle": {
+      "target_precision": 0.4,
+      "feasible": true,
+      "threshold": 0.375,
+      "validation_metrics": {
+        "precision": 0.4230769230769231,
+        "recall": 0.011615628299894404,
+        "promoted_cycles": 26,
+        "failed_cycles": 947
+      },
+      "test_metrics": {
+        "threshold": 0.375,
+        "total_cycles": 7487,
+        "failed_cycles": 902,
+        "promoted_cycles": 8,
+        "true_positive_cycles": 5,
+        "false_positive_cycles": 3,
+        "false_negative_cycles": 897,
+        "precision": 0.625,
+        "recall": 0.005543237250554324,
+        "lead_time_days_mean": 8.304641333333333,
+        "lead_time_days_median": 6.799057673611111
+      }
+    }
+  }
+}

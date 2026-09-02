@@ -1,0 +1,319 @@
+{
+  "training_date": "2026-08-28T02:06:07.277413+00:00",
+  "data_end": "2026-08-27 12:25:41",
+  "primary_model": "random_survival_forest",
+  "unit_of_observation": "one row per (lifecycle, landmark) - features/age RE-ANCHORED at each landmark's observation_on (install / organic operational event / sparse 90-365d anchor), NOT frozen at installed_on like a baseline-installation model",
+  "target": "duration_days (residual time from landmark's observation_on to failure/censoring), event_observed",
+  "landmark_design": {
+    "sources": [
+      "INSTALL (age=0, always)",
+      "ORGANIC_EVENT (operational event mid-cycle)",
+      "ANCHOR (90/180/365d then +365d, capped)"
+    ],
+    "split_assignment": "follows the LIFECYCLE's installed_on (NOT per-landmark L) - see features/survival/landmarks.py docstring"
+  },
+  "feature_columns": [
+    "part_model_category",
+    "client_category",
+    "installation_age_band",
+    "item_type_at_install_grouped",
+    "terminal_type_grouped",
+    "log_days_since_installation",
+    "log_total_prior_events",
+    "log_prior_failure_count",
+    "has_prior_failure",
+    "log_prior_corrective_count",
+    "has_prior_corrective",
+    "log_days_since_last_corrective",
+    "log_prior_distinct_places",
+    "log_prior_corrective_30d",
+    "log_prior_failure_365d",
+    "log_prior_events_180d",
+    "month_sin",
+    "month_cos",
+    "log_previous_cycle_confirmed_failure_lifetime_mean",
+    "has_previous_cycle_confirmed_failure_lifetime_mean",
+    "log_failure_interval_mean_days",
+    "log_failure_interval_last_days",
+    "failure_interval_trend_ratio",
+    "has_failure_interval_trend",
+    "log_cumulative_prior_cycle_days",
+    "log_physical_age_now",
+    "previous_cycle_count",
+    "prior_corrective_60d",
+    "log_prior_corrective_60d",
+    "prior_corrective_90d",
+    "log_prior_corrective_90d",
+    "log_model_failures_90d",
+    "model_failure_rate_90d",
+    "log_model_fleet_size"
+  ],
+  "categorical_features": [
+    "part_model_category",
+    "client_category",
+    "installation_age_band",
+    "item_type_at_install_grouped",
+    "terminal_type_grouped"
+  ],
+  "category_thresholds": {
+    "item_model_code_clean": 200,
+    "item_type_at_install": 300
+  },
+  "rows_by_split": {
+    "TRAIN": 92298,
+    "TEST": 6585,
+    "VALIDATION": 5540
+  },
+  "lifecycles_by_split": {
+    "TEST": 3062,
+    "TRAIN": 14980,
+    "VALIDATION": 2316
+  },
+  "events_by_split": {
+    "TEST": 588,
+    "TRAIN": 11207,
+    "VALIDATION": 534
+  },
+  "support_totals": {
+    "0120201": 3213,
+    "0120202": 358,
+    "0120204": 1274,
+    "0120401": 1028,
+    "0120701": 168,
+    "0120702": 24,
+    "0120801": 210,
+    "0120901": 311,
+    "0121101": 1473,
+    "0121103": 1089,
+    "0121401": 416,
+    "0121408": 24,
+    "0121602": 714,
+    "0121603": 365,
+    "0121701": 271,
+    "0220402": 234,
+    "0220601": 201,
+    "0220602": 123,
+    "0220603": 13,
+    "0221601": 250,
+    "0320203": 199,
+    "0321301": 488,
+    "0321302": 492,
+    "0321501": 913,
+    "0420501": 416,
+    "0420502": 657,
+    "0420503": 139,
+    "0420504": 279,
+    "0420506": 11,
+    "0420510": 161,
+    "0521102": 492,
+    "0521104": 68,
+    "0521201": 1753,
+    "0521202": 397,
+    "0521203": 352,
+    "0521204": 76,
+    "0620302": 1064,
+    "0620307": 47,
+    "0620308": 6,
+    "0620505": 699,
+    "0620512": 4,
+    "0620517": 27,
+    "0720301": 1924,
+    "0721001": 165,
+    "0820303": 143,
+    "0820507": 53,
+    "0820604": 11,
+    "0820605": 37,
+    "0820607": 7,
+    "0821901": 39,
+    "0921604": 59,
+    "0921610": 36,
+    "1020206": 11,
+    "1020511": 2,
+    "1020513": 8,
+    "1020514": 5,
+    "1020515": 1,
+    "1020516": 1,
+    "1020606": 5,
+    "1020608": 1,
+    "1020609": 5,
+    "1020610": 5,
+    "1021402": 50,
+    "1021406": 2,
+    "1021407": 1,
+    "1021902": 6,
+    "1122001": 356,
+    "1420511": 40,
+    "1520512": 292,
+    "1521403": 128,
+    "1521405": 213,
+    "1620205": 4,
+    "1920611": 24,
+    "1921105": 12,
+    "1921205": 14,
+    "1921303": 12
+  },
+  "item_type_support_totals": {
+    "BARCODE SCANNER": 3184,
+    "CARD DISPANSER": 192,
+    "CARD SLOT": 210,
+    "CASH DISPENSER": 311,
+    "CASH DRAWER": 45,
+    "COIN ACCEPTOR": 165,
+    "COIN DISPENSER": 271,
+    "CONTROLLER": 3134,
+    "DISPLAY": 432,
+    "LAN ARRESTER": 356,
+    "MODULE BILL ACCEPTOR": 1262,
+    "MODULE READER": 5059,
+    "MOTOR": 2592,
+    "PC": 2795,
+    "POWER SUPPLY": 992,
+    "PRINTER": 834,
+    "TRANSFORMER": 913,
+    "UPS": 1424
+  },
+  "terminal_support_totals": {
+    "BALANCE READER": 543,
+    "CVIM": 3340,
+    "GATE": 8173,
+    "POS": 1281,
+    "UNKNOWN": 10347,
+    "VENDING MACHINE": 487
+  },
+  "hyperparameters": {
+    "random_survival_forest": {
+      "n_estimators": 50,
+      "min_samples_split": 140,
+      "min_samples_leaf": 100,
+      "max_features": "sqrt",
+      "n_jobs": 1,
+      "random_state": 42
+    },
+    "random_survival_forest_target_coarsening": "daily resolution <=120 days, 60-day steps beyond - fit() target only, NOT applied to evaluation (native_metrics uses original duration_days)",
+    "cox_ph": {
+      "alpha": 0.1,
+      "ties": "efron"
+    }
+  },
+  "calibration": {
+    "method": "isotonic per horizon, VALIDATION landmark rows, definite binary label (event<=horizon=1, survived-to-horizon=0, censored-before-horizon excluded)",
+    "horizons_days": [
+      30,
+      60,
+      90,
+      120
+    ],
+    "cummax_required": true,
+    "applied_to_advisory_fields": true
+  },
+  "evaluation_metrics_full_landmark_rows": {
+    "random_survival_forest": {
+      "validation": {
+        "rows": 5540,
+        "events": 534,
+        "c_index": 0.8416741854906196,
+        "max_followup_days": 363.0,
+        "uno_c_index": 0.8416943866253715,
+        "horizons_evaluable_days": [
+          30,
+          60,
+          90,
+          120
+        ],
+        "integrated_brier_score": 0.04823316103796496,
+        "brier_at_horizon": {
+          "30": 0.03569156423597563,
+          "60": 0.04676259964183745,
+          "90": 0.052794367013118966,
+          "120": 0.05459346868190132
+        },
+        "time_dependent_auc_at_horizon": {
+          "30": 0.8508501643547206,
+          "60": 0.8394456086001507,
+          "90": 0.8452818727996436,
+          "120": 0.8562278869310804
+        }
+      },
+      "test": {
+        "rows": 6585,
+        "events": 588,
+        "c_index": 0.8769808758936214,
+        "max_followup_days": 238.0,
+        "uno_c_index": 0.876794250674259,
+        "horizons_evaluable_days": [
+          30,
+          60,
+          90,
+          120
+        ],
+        "integrated_brier_score": 0.05311003932390142,
+        "brier_at_horizon": {
+          "30": 0.05003238687140474,
+          "60": 0.053565371697616965,
+          "90": 0.05432761251700343,
+          "120": 0.05284188064276296
+        },
+        "time_dependent_auc_at_horizon": {
+          "30": 0.8892521895100981,
+          "60": 0.9058902612956173,
+          "90": 0.9164498817459487,
+          "120": 0.8935146842634456
+        }
+      }
+    },
+    "cox_ph": {
+      "validation": {
+        "rows": 5540,
+        "events": 534,
+        "c_index": 0.7918262876014033,
+        "max_followup_days": 363.0,
+        "uno_c_index": 0.792309543353953,
+        "horizons_evaluable_days": [
+          30,
+          60,
+          90,
+          120
+        ],
+        "integrated_brier_score": 0.05358813650154043,
+        "brier_at_horizon": {
+          "30": 0.038647552372242364,
+          "60": 0.05237800560216183,
+          "90": 0.05847799481051372,
+          "120": 0.0611692658116491
+        },
+        "time_dependent_auc_at_horizon": {
+          "30": 0.7924768768331821,
+          "60": 0.7898224499289419,
+          "90": 0.8024220910253779,
+          "120": 0.8196333335768806
+        }
+      },
+      "test": {
+        "rows": 6585,
+        "events": 588,
+        "c_index": 0.773268463801239,
+        "max_followup_days": 238.0,
+        "uno_c_index": 0.7734407825652323,
+        "horizons_evaluable_days": [
+          30,
+          60,
+          90,
+          120
+        ],
+        "integrated_brier_score": 0.06623071980854452,
+        "brier_at_horizon": {
+          "30": 0.06026552141794982,
+          "60": 0.06627629390574445,
+          "90": 0.06832100238502335,
+          "120": 0.06792420485178166
+        },
+        "time_dependent_auc_at_horizon": {
+          "30": 0.7780022468494345,
+          "60": 0.8044736316221286,
+          "90": 0.8244961597612932,
+          "120": 0.8095873820610285
+        }
+      }
+    }
+  }
+}
