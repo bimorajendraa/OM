@@ -22,6 +22,7 @@ from partrisk.serving import single as serving
 from partrisk.serving import batch as serving_batch
 from partrisk.engines.failure import train as training_failure
 from partrisk.engines.failure import gate
+from partrisk.predictive import scoring as predictive_scoring
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -54,6 +55,27 @@ def _pipeline_main() -> int:
         return 1
 
     _pipeline_logger.info("pipeline selesai dalam %.1f detik", time.time() - started)
+    return 0
+
+
+_score_persist_logger = logging.getLogger("score_and_persist")
+
+
+def _score_and_persist_main() -> int:
+    """Satu siklus scheduled scoring: skor seluruh PART aktif, simpan sebagai
+    model_run + item_prediction baru di schema `predictive` (Milestone 2).
+    Dipanggil scheduler eksternal (cron/Task Scheduler) secara berkala -
+    lihat docs/DATABASE.md."""
+    started = time.time()
+    try:
+        result = predictive_scoring.run_and_persist()
+    except Exception:
+        _score_persist_logger.exception("score-and-persist gagal")
+        return 1
+    _score_persist_logger.info(
+        "run_id=%s model_version=%s row_count=%d selesai dalam %.1f detik",
+        result["run_id"], result["model_version"], result["row_count"], time.time() - started,
+    )
     return 0
 
 
@@ -888,6 +910,12 @@ def main() -> int:
     p_predict.add_argument("--output", help="Simpan seluruh hasil ke file CSV (opsional).")
     p_predict.add_argument("--top", type=int, default=10, help="Berapa baris teratas dicetak.")
 
+    sub.add_parser(
+        "score-and-persist",
+        help="Milestone 2: skor seluruh PART aktif dan simpan sebagai model_run + "
+        "item_prediction baru di schema predictive. Dipanggil scheduler eksternal berkala.",
+    )
+
     p_golden = sub.add_parser(
         "golden-batch",
         help="Oracle golden batch (generate/compare).",
@@ -937,6 +965,8 @@ def main() -> int:
         return _pipeline_main()
     if args.command == "predict":
         return _predict_main(args)
+    if args.command == "score-and-persist":
+        return _score_and_persist_main()
     if args.command == "golden-batch":
         return _golden_batch_main(args)
     if args.command == "baseline-performance":

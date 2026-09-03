@@ -38,6 +38,9 @@ def db_settings() -> dict[str, str]:
     }
 
 
+PREDICTIVE_SCHEMA = "predictive"
+
+
 CATEGORICAL_FEATURES = [
     "part_model_category",
     "client_category",

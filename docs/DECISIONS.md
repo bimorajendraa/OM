@@ -895,3 +895,52 @@ matematika umum, BUKAN model Q1), atau (b) komentar/docstring yang
 menjelaskan riwayat penghapusan ini.
 
 ---
+
+## 22 · Predictive DB satu server dengan schema baru, BUKAN server Postgres kedua
+
+**Status**: berlaku, 2026-09-03. Milestone 2 dari refactor Terminal->Part->Item.
+
+Rencana awal (dipilih user via pertanyaan eksplisit sebelum Milestone 1
+dimulai) adalah menambah **server Postgres kedua** (docker-compose) khusus
+untuk data predictive, terpisah total dari database operasional. Dibatalkan
+setelah user mengklarifikasi: akan ada scheduler EKSTERNAL (di luar repo
+ini, dikelola tim/infra lain) yang pull/duplicate data dari database
+production ke database yang SAMA yang dipakai proyek ini (`OMNEW` di `.env`
+lokal saat ini) - jadi database yang sudah dikonfigurasi BUKAN production
+langsung, melainkan salinan yang sudah diisolasi. Server Postgres kedua jadi
+tidak perlu; cukup schema baru (`predictive`) di database yang sama.
+
+**Implementasi** (`migrations/predictive/0001_init.sql`,
+`src/partrisk/predictive/db.py`, `src/partrisk/predictive/scoring.py`):
+- `core/data_reader.py` TIDAK berubah - tetap baca schema operasional,
+  tetap `default_transaction_read_only=on`. Repo ini TIDAK bertanggung
+  jawab atas proses duplikasi data production->OMNEW itu sendiri (di luar
+  scope, dikerjakan tim lain).
+- `predictive/db.py::connect()` - koneksi TERPISAH, `search_path=
+  predictive,public`, TANPA read-only. Kredensial (`config.db_settings()`)
+  sama persis dengan `data_reader.py` untuk sekarang (satu set env var) -
+  dibedakan murni lewat schema, bukan lewat host/kredensial berbeda.
+- Tabel Milestone 2 saja: `predictive.model_run`, `predictive.item_prediction`
+  (append-only). `item_cycle`/`intervention`/`alert`/`alert_event` MENYUSUL
+  di migrasi Milestone 4/5, sengaja belum dibuat sekarang (hindari
+  merancang skema sebelum kebutuhan konkretnya jelas).
+- Penulisan prediksi dipisah dari cache batch in-memory yang dipakai
+  serving (`serving/batch.py`, tidak diubah) - `predictive/scoring.py::
+  run_and_persist()` dipanggil eksplisit lewat `python -m partrisk.cli
+  score-and-persist`, dimaksudkan dipanggil scheduler eksternal berkala.
+  Kalau dikaitkan otomatis ke tiap `score_active_parts()`, setiap
+  request API/test/CLI ad-hoc akan ikut menulis baris riwayat prediksi -
+  tidak diinginkan (lihat WHY di scoring.py).
+
+**Kalau nanti perlu dipisah lagi** (skala, izin akses berbeda per tim):
+`pg_dump --schema=predictive` ke server baru + ubah `.env` - tidak
+menyentuh kode, karena `predictive/db.py` sudah terisolasi dari
+`data_reader.py` sejak awal.
+
+**Verifikasi**: `grep -rn "predictive" src/partrisk/core/data_reader.py`
+harus kosong - `data_reader.py` tidak boleh tahu apa pun soal schema
+predictive. Sebaliknya, tidak ada `INSERT/UPDATE/DELETE` di
+`core/data_reader.py` (masih dipaksa DB-level lewat
+`default_transaction_read_only`).
+
+---

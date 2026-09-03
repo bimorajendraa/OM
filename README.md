@@ -1,9 +1,10 @@
 # Predictive Maintenance
 
 Prediksi kerusakan (failure prediction) untuk PART armada: peluang rusak
-30/60/90/120 hari dan prioritas perawatan. Database **hanya dibaca** - repo
-ini tidak pernah membuat, mengubah, atau menghapus apa pun di database
-operasional.
+30/60/90/120 hari dan prioritas perawatan. Data operasional **hanya
+dibaca** - repo ini tidak pernah membuat, mengubah, atau menghapus apa pun
+di schema operasional. Riwayat prediksi ditulis ke schema `predictive`
+terpisah - lihat `docs/DATABASE.md`.
 
 ## Satu model: prediksi kerusakan
 
@@ -84,6 +85,7 @@ yang dipakai adalah PostgreSQL yang sudah ada, kredensial dari `.env` di host.
 ```bash
 python -m partrisk.cli pipeline               # uji jalur database -> fitur, tanpa model
 python -m partrisk.cli predict --top 20        # batch prediction manual ke terminal/CSV
+python -m partrisk.cli score-and-persist       # skor + simpan ke predictive DB (dipanggil scheduler)
 python -m partrisk.cli golden-batch generate --out FILE   # oracle regresi (lihat docs/DECISIONS.md)
 python -m partrisk.cli golden-batch compare A B
 python -m partrisk.cli baseline-performance    # RSS/latency model kerusakan
@@ -170,18 +172,22 @@ src/partrisk/
 │   ├── single.py               prediksi satu PART, rekomendasi, penjelasan, riwayat
 │   ├── batch.py                prediksi SELURUH PART aktif sekaligus (vectorized)
 │   └── alerts.py                alert lifecycle (dedup, resolve-alert), tanpa persistence
+├── predictive/
+│   ├── db.py                   koneksi tulis schema `predictive` + migration runner
+│   └── scoring.py               model_run + item_prediction (append-only) - `score-and-persist`
 ├── api/
 │   ├── app.py                  FastAPI: app, routes, db pool, settings, logging
 │   ├── schemas.py               bentuk request/response API
 │   └── services.py              geocoding (peta) + agregasi monitoring
 └── cli.py                      pipeline/predict/golden-batch/baseline/backtest/dst - lihat `python -m partrisk.cli -h`
 
+migrations/predictive/   SQL migrasi schema predictive, terurut nomor - lihat docs/DATABASE.md
 dashboard/       Streamlit (app.py + pages/); hanya bicara ke API lewat HTTP, tidak pernah ke DB
 tests/           conftest.py + test_pipeline.py + test_lifecycle.py + test_gate.py +
-                 test_serving.py + test_api.py
+                 test_serving.py + test_api.py + test_predictive.py
 docs/            METHODOLOGY.md (indeks per simbol) · CODE_NOTES.md (catatan
                  implementasi dari kode) · EXPERIMENTS.md (log eksperimen
-                 kronologis, 80+) · DECISIONS.md (ADR)
+                 kronologis, 80+) · DECISIONS.md (ADR) · DATABASE.md (schema predictive)
 models/          failure/{CURRENT,v3..v6}
 ```
 
@@ -206,7 +212,9 @@ production.
 
 ## Pagar keras (tidak boleh dilanggar)
 
-- Database tetap read-only; sesi dipaksa `default_transaction_read_only=on`.
+- Schema operasional tetap read-only; sesi `data_reader.py` dipaksa
+  `default_transaction_read_only=on`. Hanya `predictive/db.py` yang menulis,
+  dan hanya ke schema `predictive` - lihat `docs/DATABASE.md`.
 - `serving*` tidak pernah meng-import `api*` - arah hanya `api -> serving`.
 - `dashboard/` tidak meng-import `partrisk`, tidak menyentuh DB/model - semua
   angka lewat HTTP.
