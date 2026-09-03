@@ -944,3 +944,66 @@ predictive. Sebaliknya, tidak ada `INSERT/UPDATE/DELETE` di
 `default_transaction_read_only`).
 
 ---
+
+## 23 · Geocoding/peta lokasi dihapus - di luar scope failure-prediction
+
+**Status**: berlaku, 2026-09-03. Permintaan eksplisit user: fitur peta
+(geocoding OpenStreetMap/Nominatim, pin lokasi, `GET /api/v1/locations/map`)
+tidak berhubungan dengan objektif failure-prediction sistem ini - dihapus.
+
+**Yang dihapus**: `api/services.py` (seluruh fungsi geocoding -
+`_query_nominatim`, `resolve_missing`, `known_coordinates`, dst -
+`_score_distribution`/`_unknown_category_share`/`_feature_summary`/
+`failure_monitoring`/`summary` TETAP, itu monitoring model bukan geocoding),
+endpoint `GET /api/v1/locations/map`, schema `ResolvedLocation`/
+`UnresolvedLocation`/`LocationMapResponse`, `serving/batch.py::
+location_summary()` (satu-satunya konsumennya endpoint di atas), tab "Peta
+Persebaran" di `dashboard/pages/3_Inspeksi.py` beserta `ui.py::
+risk_marker_color/radius`, `api_client.py::locations_map()`, dan alur
+`map_location_filter` (session-state relay dari tab peta ke filter Lokasi
+di `1_Parts.py` - producer-nya hilang, jadi consumer-nya ikut disederhanakan).
+Fixture `needs_internet` (`tests/conftest.py`) juga dihapus - satu-satunya
+pemakainya geocoding dan test AppTest dashboard yang dulu ikut terkena
+(halaman tidak lagi memanggil jaringan eksternal apa pun).
+
+**Yang TETAP**: field `location` (nama lokasi tekstual dari data
+operasional, mis. "GUDANG NI") dan filternya di `/recommendations` -
+itu data operasional biasa, independen dari fitur peta/koordinat yang
+dihapus.
+
+**Kenapa bisa dihapus bersih tanpa mengubah perilaku Q2**: fitur peta murni
+lapisan presentasi read-only di atas prediction yang sudah ada (seperti
+Terminal §14) - tidak pernah memengaruhi `failure_probability_*`/
+`risk_level`/`tier_score`.
+
+---
+
+## 24 · Monitoring drift/live dihapus - di luar scope untuk sekarang
+
+**Status**: berlaku, 2026-09-03. Permintaan eksplisit user, sesi yang sama
+dengan §23. `src/partrisk/api/services.py` HABIS isinya cuma monitoring
+(geocoding sudah dihapus di §23) - file dihapus total, bukan dikosongkan.
+
+**Yang dihapus**: endpoint `GET /api/v1/monitoring/metrics` dan
+`/monitoring/metrics/failure`, `api/services.py` (seluruh isi: score
+distribution, unknown-category-share, feature drift summary,
+`failure_monitoring()`/`summary()`), `api_client.py::monitoring_metrics()`,
+bagian "live" (PART aktif dinilai, distribusi risiko saat ini) di
+`dashboard/pages/6_Sistem.py` - halaman TETAP ADA, disederhanakan jadi
+murni info versi/metrik uji model dari `GET /api/v1/model` (metadata
+training statis, BUKAN monitoring live).
+
+**Yang TETAP**: `serving.describe()` (`GET /api/v1/model`) - field `gate`
+ditambahkan ke situ (sebelumnya cuma muncul lewat monitoring) supaya
+halaman Sistem masih bisa menampilkan status gerbang presisi tanpa endpoint
+monitoring. `serving/alerts.py::open_count()`/`open_lead_times_days()`
+SENGAJA TIDAK dihapus walau konsumen satu-satunya (`failure_monitoring()`)
+sudah hilang - itu bagian API alert lifecycle sendiri (bukan kode
+monitoring), sudah punya test dedicated, dan kemungkinan besar dibutuhkan
+lagi utuh di Milestone 5 (persistent alert).
+
+**Observability production (master-prompt §32)** dicatat sebagai gap
+TERBUKA, bukan ditutup - kalau/ketika dibutuhkan lagi, revisit sebagai
+bagian Milestone 7 (Production Hardening), bukan dibangun ulang sekarang.
+
+---

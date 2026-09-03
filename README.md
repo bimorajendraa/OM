@@ -114,8 +114,8 @@ dijalankan rutin.
 | `GET /api/v1/overview` | angka ringkas armada + daftar teratas |
 | `GET /api/v1/filters` | nilai filter yang benar-benar ada di data |
 | `GET /api/v1/terminals` | ringkasan per Terminal fisik (jumlah PART, sebaran risiko, PART paling berisiko) |
-| `GET /api/v1/locations/map` | sebaran risiko per lokasi + koordinat (geocoding, kalau ada) |
-| `GET /api/v1/monitoring/metrics`, `/failure` | metrik monitoring: offline (dari training) + live (populasi aktif) |
+| `GET /api/v1/terminals/{terminal_id}/parts` | level 2 hierarki: ringkasan per Part Type (`item_model_code`) dalam satu Terminal |
+| `GET /api/v1/terminals/{terminal_id}/parts/{part_type}` | level 3 hierarki: daftar Item untuk satu Part Type dalam satu Terminal |
 
 Filter `/api/v1/recommendations`: `search`, `risk`, `priority`, `item_type`,
 `client`, `location`, `terminal_id`, `limit`, `offset`.
@@ -177,8 +177,7 @@ src/partrisk/
 │   └── scoring.py               model_run + item_prediction (append-only) - `score-and-persist`
 ├── api/
 │   ├── app.py                  FastAPI: app, routes, db pool, settings, logging
-│   ├── schemas.py               bentuk request/response API
-│   └── services.py              geocoding (peta) + agregasi monitoring
+│   └── schemas.py               bentuk request/response API
 └── cli.py                      pipeline/predict/golden-batch/baseline/backtest/dst - lihat `python -m partrisk.cli -h`
 
 migrations/predictive/   SQL migrasi schema predictive, terurut nomor - lihat docs/DATABASE.md

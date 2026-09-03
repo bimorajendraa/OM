@@ -91,16 +91,14 @@ def terminals() -> dict:
     return _get("/api/v1/terminals")
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Mencari koordinat lokasi...")
-def locations_map(resolve: bool = True, budget_seconds: int = 60) -> dict:
-    return _get(
-        "/api/v1/locations/map", {"resolve": resolve, "budget_seconds": budget_seconds}
-    )
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Mengelompokkan PART per jenis...")
+def terminal_parts(terminal_id: str) -> dict:
+    return _get(f"/api/v1/terminals/{terminal_id}/parts")
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def monitoring_metrics() -> dict:
-    return _get("/api/v1/monitoring/metrics")
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Mengambil daftar PART...")
+def terminal_part_items(terminal_id: str, part_type: str) -> dict:
+    return _get(f"/api/v1/terminals/{terminal_id}/parts/{part_type}", {"limit": 500})
 
 
 def percent(value: float | None) -> str:

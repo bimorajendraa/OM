@@ -4,18 +4,9 @@ services:
     image: production-ml:latest
     env_file: .env
     environment:
-      # .env biasanya berisi DB_HOST=localhost untuk dijalankan native (lihat
-      # README) - di dalam container "localhost" merujuk ke container itu
-      # sendiri, bukan database di host. Ditimpa di sini supaya .env tidak
-      # perlu diubah bolak-balik setiap pindah native <-> Docker.
       DB_HOST: host.docker.internal
     ports:
-      # Hanya localhost - siap untuk Nginx reverse proxy nanti (belum
-      # disiapkan sekarang). Tanpa "127.0.0.1:" port ini kebuka ke jaringan
-      # publik kalau host punya IP publik.
       - "127.0.0.1:8000:8000"
-    # Di Linux, database yang jalan di host dijangkau lewat nama ini. Di
-    # Docker Desktop (Windows/Mac) nama ini sudah otomatis tersedia.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -25,8 +16,6 @@ services:
     image: production-ml:latest
     env_file: .env
     environment:
-      # Dashboard bicara ke API lewat jaringan compose - tidak pernah ke
-      # database, dan tidak perlu tahu kredensialnya.
       API_BASE_URL: http://api:8000
     command:
       - streamlit
@@ -38,13 +27,14 @@ services:
       - --browser.gatherUsageStats=false
     ports:
       - "127.0.0.1:8501:8501"
-    # Image ini sama dengan service api, jadi HEALTHCHECK bawaan Dockerfile
-    # (cek port 8000) selalu gagal di container ini - tidak ada yang
-    # mendengarkan di situ, yang jalan cuma Streamlit di 8501. Ditimpa di sini
-    # supaya healthcheck memang mengecek proses yang benar-benar jalan.
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read()"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read()",
+        ]
       interval: 30s
       timeout: 10s
       start_period: 20s

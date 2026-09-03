@@ -342,6 +342,7 @@ def filter_scores(
     client: str | None = None,
     location: str | None = None,
     terminal_id: str | None = None,
+    part_type: str | None = None,
     search: str | None = None,
     official_queue_only: bool = True,
 ) -> pd.DataFrame:
@@ -365,6 +366,8 @@ def filter_scores(
         result = result[result["location"].fillna("").str.upper().eq(location.upper())]
     if terminal_id:
         result = result[result["terminal_id"].astype("string").eq(str(terminal_id))]
+    if part_type:
+        result = result[result["item_model_code"].fillna("").str.upper().eq(part_type.upper())]
     return result
 
 
@@ -387,16 +390,6 @@ def summary(frame: pd.DataFrame) -> dict:
             for days in config.PREDICTION_HORIZON_DAYS
         },
     }
-
-
-def location_summary(frame: pd.DataFrame) -> pd.DataFrame:
-    known = frame.loc[frame["location"].notna()]
-    grouped = known.groupby("location").agg(
-        active_parts=("item_id", "count"),
-        high_risk_parts=("failure_risk_level", lambda s: int((s == "HIGH").sum())),
-        medium_risk_parts=("failure_risk_level", lambda s: int((s == "MEDIUM").sum())),
-    )
-    return grouped.sort_values("high_risk_parts", ascending=False)
 
 
 _TERMINAL_COLUMNS = [
@@ -442,6 +435,31 @@ def terminal_summary(frame: pd.DataFrame) -> pd.DataFrame:
     return grouped.sort_values(
         ["high_risk_parts", "medium_risk_parts"], ascending=False
     )
+
+
+_TERMINAL_PART_COLUMNS = [
+    "part_type", "installed_count", "high_risk_parts", "medium_risk_parts",
+    "low_risk_parts", "open_alert_count",
+]
+
+
+def terminal_part_summary(frame: pd.DataFrame, terminal_id: str) -> pd.DataFrame:
+    known = frame.loc[
+        frame["terminal_id"].astype("string").eq(str(terminal_id))
+        & frame["item_model_code"].notna()
+    ].copy()
+    if known.empty:
+        return pd.DataFrame(columns=_TERMINAL_PART_COLUMNS).set_index("part_type")
+
+    grouped = known.groupby("item_model_code").agg(
+        installed_count=("item_id", "count"),
+        high_risk_parts=("failure_risk_level", lambda s: int((s == "HIGH").sum())),
+        medium_risk_parts=("failure_risk_level", lambda s: int((s == "MEDIUM").sum())),
+        low_risk_parts=("failure_risk_level", lambda s: int((s == "LOW").sum())),
+        open_alert_count=("alert_status", lambda s: int((s == "OPEN").sum())),
+    )
+    grouped.index.name = "part_type"
+    return grouped.sort_values(["high_risk_parts", "medium_risk_parts"], ascending=False)
 
 
 def facets(frame: pd.DataFrame) -> dict[str, list[str]]:

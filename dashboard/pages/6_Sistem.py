@@ -11,13 +11,12 @@ ui.top_status_bar(status=system_status)
 ui.page_header(
     "ADMIN",
     "Sistem",
-    "Versi model, kesegaran data, dan kesehatan model. Halaman ini untuk pemeriksaan teknis, "
+    "Versi dan metrik uji model yang sedang aktif. Halaman ini untuk pemeriksaan teknis, "
     "bukan untuk keputusan operasional harian.",
 )
 
 try:
     model = api_client.model_info()
-    metrics = api_client.monitoring_metrics()
 except api_client.ApiError as error:
     st.error("Informasi sistem belum bisa dimuat. Periksa koneksi lalu coba kembali.")
     with st.expander("Detail error"):
@@ -25,25 +24,16 @@ except api_client.ApiError as error:
     st.stop()
 
 failure_model = model.get("failure") or {}
-failure_metrics = metrics.get("failure") or {}
-failure_offline = failure_metrics.get("offline") or {}
-failure_live = failure_metrics.get("live") or {}
 
 ui.section_label("MODEL KERUSAKAN")
 ui.fact_grid([
     ("Versi model", failure_model.get("model_version") or "-", True),
     ("Tanggal training", failure_model.get("training_date") or "-", True),
-    ("Data sampai", ui.format_date(failure_live.get("data_through")), True),
-    ("PART aktif dinilai", f"{failure_live.get('active_parts', 0):,}", True),
+    ("Data sampai", ui.format_date(failure_model.get("data_through")), True),
 ])
-risk_counts = failure_live.get("risk_level_counts") or {}
-st.caption(
-    f"Distribusi risiko saat ini — Tinggi: {risk_counts.get('HIGH', 0):,} · "
-    f"Sedang: {risk_counts.get('MEDIUM', 0):,} · Rendah: {risk_counts.get('LOW', 0):,}"
-)
 with st.expander("Metrik uji model kerusakan"):
-    st.json(failure_offline.get("test_metrics") or {})
-    gate = failure_offline.get("gate")
+    st.json(failure_model.get("test_metrics") or {})
+    gate = failure_model.get("gate")
     if gate:
         st.caption("Status gerbang kualitas model")
         st.json(gate)

@@ -1,8 +1,3 @@
-# Satu image untuk dua proses: API dan dashboard.
-#
-# Keduanya memakai kode yang sama persis dan bedanya hanya perintah start, jadi
-# membangun dua image terpisah cuma menggandakan hal yang harus dijaga sinkron.
-# docker-compose.yml menjalankan image ini dua kali dengan command berbeda.
 FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -11,33 +6,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Dependensi disalin lebih dulu supaya layer-nya dipakai ulang selama daftarnya
-# tidak berubah. Versi PERSIS (bukan requirements-serving.txt yang rentang)
-# supaya image production reproducible - lihat requirements.lock.txt.
 COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
-# Paket partrisk sendiri (src/partrisk/) di layer terpisah dari requirements
-# di atas - perubahan kode tidak memaksa install ulang seluruh dependensi.
-# --no-deps: requirements.lock.txt di atas SUDAH otoritatif untuk versi
-# dependensi runtime (lihat pyproject.toml soal kenapa dependencies=[]).
 COPY pyproject.toml ./
 COPY src/ ./src/
 RUN pip install --no-cache-dir --no-deps .
 
-# `pip install .` (BUKAN -e) MENYALIN src/partrisk/ ke site-packages, terlepas
-# dari /app - config.py punya default struktural (naik dari lokasi file
-# config.py sendiri) yang jadi SALAH begitu package pindah lokasi seperti
-# ini. PARTRISK_HOME eksplisit di sini memastikan models/ dan .env tetap
-# ditemukan di /app, bukan di dalam site-packages - lihat Fase B0/B1 restrukturisasi.
 ENV PARTRISK_HOME=/app
 
-# Model ikut masuk image: versinya harus persis yang sudah diuji, bukan yang
-# kebetulan ada di host saat container jalan.
 COPY . .
 
-# Jalan sebagai user biasa. Aplikasi ini hanya MEMBACA - tidak menulis apa pun
-# ke database maupun ke filesystem.
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 

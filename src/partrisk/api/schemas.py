@@ -194,39 +194,7 @@ class HistoryResponse(BaseModel):
     locations: list[LocationHistoryItem]
 
 
-class ResolvedLocation(BaseModel):
-    model_config = _CONFIG
-
-    location: str
-    lat: float
-    lon: float
-    active_parts: int
-    high_risk_parts: int
-    medium_risk_parts: int
-
-
-class UnresolvedLocation(BaseModel):
-    model_config = _CONFIG
-
-    location: str
-    active_parts: int
-    high_risk_parts: int
-    medium_risk_parts: int
-    checked: bool
-
-
-class LocationMapResponse(BaseModel):
-    model_config = _CONFIG
-
-    resolved: list[ResolvedLocation]
-    unresolved: list[UnresolvedLocation]
-    scored_at: ScoredAt
-
-
 class TerminalSummaryItem(BaseModel):
-    """Ringkasan satu Terminal - hasil AGREGASI prediction per-PART yang
-    sudah ada (docs/DECISIONS.md), bukan model/skor baru khusus terminal."""
-
     model_config = _CONFIG
 
     terminal_id: str
@@ -248,6 +216,25 @@ class TerminalListResponse(BaseModel):
     terminals_total: int
     parts_with_terminal: int
     parts_without_terminal: int
+    scored_at: ScoredAt
+
+
+class TerminalPartSummaryItem(BaseModel):
+    model_config = _CONFIG
+
+    part_type: str
+    installed_count: int
+    high_risk_parts: int
+    medium_risk_parts: int
+    low_risk_parts: int
+    open_alert_count: int
+
+
+class TerminalPartListResponse(BaseModel):
+    model_config = _CONFIG
+
+    terminal_id: str
+    parts: list[TerminalPartSummaryItem]
     scored_at: ScoredAt
 
 

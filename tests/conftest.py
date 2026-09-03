@@ -27,16 +27,6 @@ def _models_available() -> bool:
         return False
 
 
-def _internet_available() -> bool:
-    try:
-        import requests
-
-        requests.get("https://nominatim.openstreetmap.org/status", timeout=5)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 _STRICT = os.getenv("REQUIRE_DATABASE", "").lower() in ("1", "true", "yes")
 
 _HAS_DATABASE = _database_available()
@@ -57,9 +47,6 @@ needs_database = pytest.mark.skipif(
 )
 needs_models = pytest.mark.skipif(
     not _HAS_MODELS, reason="model production belum ada di models/"
-)
-needs_internet = pytest.mark.skipif(
-    not _internet_available(), reason="tidak ada akses internet (geocoding)"
 )
 
 

@@ -73,8 +73,9 @@ selected_terminal_id = ui.labeled_table(
     key="terminal_list",
     id_field="terminal_id",
 )
-if selected_terminal_id:
+if selected_terminal_id and selected_terminal_id != st.session_state.get("selected_terminal_id"):
     st.session_state["selected_terminal_id"] = selected_terminal_id
+    st.session_state.pop("selected_part_type", None)
 
 selected_terminal_id = st.session_state.get("selected_terminal_id")
 if selected_terminal_id and any(t["terminal_id"] == selected_terminal_id for t in terminals):
@@ -89,30 +90,51 @@ if selected_terminal_id and any(t["terminal_id"] == selected_terminal_id for t i
     ])
 
     try:
-        parts = api_client.recommendations(
-            terminal_id=terminal_id,
-            official_queue_only=False,
-            limit=500,
-        )
+        part_types = api_client.terminal_parts(terminal_id)["parts"]
     except api_client.ApiError as error:
-        st.error("Daftar PART terminal belum bisa dimuat.")
+        st.error("Daftar jenis PART di terminal ini belum bisa dimuat.")
         with st.expander("Detail error"):
             st.code(str(error))
         st.stop()
 
-    ui.section_label("PART DI TERMINAL")
-    ui.priority_table(
-        parts["items"],
-        key="terminal_parts",
-        as_of=data_through,
+    ui.section_label("JENIS PART DI TERMINAL")
+    st.caption("Klik satu baris untuk melihat PART dari jenis tersebut.")
+    selected_part_type = ui.labeled_table(
+        part_types,
         columns=[
-            "rank",
-            "item_id",
-            "item_type",
-            "failure_risk_level",
-            "failure_probability_30d",
-            "recommended_action",
+            "part_type", "installed_count", "high_risk_parts",
+            "medium_risk_parts", "low_risk_parts", "open_alert_count",
         ],
         empty_message="Terminal ini belum memiliki PART aktif yang bisa dinilai.",
+        key="terminal_part_types",
+        id_field="part_type",
     )
-    ui.probability_caption()
+    if selected_part_type:
+        st.session_state["selected_part_type"] = selected_part_type
+
+    selected_part_type = st.session_state.get("selected_part_type")
+    if selected_part_type and any(p["part_type"] == selected_part_type for p in part_types):
+        try:
+            items = api_client.terminal_part_items(terminal_id, selected_part_type)
+        except api_client.ApiError as error:
+            st.error("Daftar PART belum bisa dimuat.")
+            with st.expander("Detail error"):
+                st.code(str(error))
+            st.stop()
+
+        ui.section_label(f"PART - JENIS {selected_part_type}")
+        ui.priority_table(
+            items["items"],
+            key="terminal_part_items",
+            as_of=data_through,
+            columns=[
+                "rank",
+                "item_id",
+                "item_type",
+                "failure_risk_level",
+                "failure_probability_30d",
+                "recommended_action",
+            ],
+            empty_message="Tidak ada PART aktif untuk jenis ini.",
+        )
+        ui.probability_caption()

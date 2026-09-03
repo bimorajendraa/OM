@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -11,8 +9,6 @@ import pytest
 
 from partrisk.core import config
 from partrisk.core import data_reader
-from partrisk.api import services as gs
-from partrisk.api import services as monitoring_service
 from partrisk.engines import predict as failure_model
 from partrisk.serving import single as explanation
 from partrisk.serving import single as predictor
@@ -24,13 +20,11 @@ from partrisk.serving.single import (
     RISK_LEVELS,
     recommend,
 )
-from tests.conftest import needs_database, needs_internet, needs_models
+from tests.conftest import needs_database, needs_models
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
 if str(DASHBOARD_DIR) not in sys.path:
     sys.path.insert(0, str(DASHBOARD_DIR))
-
-import ui  # noqa: E402
 
 
 def test_setiap_kelompok_risiko_punya_rekomendasi():
@@ -377,98 +371,6 @@ def test_open_lead_times_days_positif_untuk_alert_baru_dibuka():
     assert 0 <= ages[0] < 1
 
 
-def test_score_distribution_kosong_untuk_array_kosong():
-    assert monitoring_service._score_distribution(np.array([])) == {}
-
-
-def test_score_distribution_urut_naik():
-    scores = np.random.default_rng(0).random(500)
-    result = monitoring_service._score_distribution(scores)
-    assert result["min"] <= result["p05"] <= result["p25"] <= result["median"]
-    assert result["median"] <= result["p75"] <= result["p95"] <= result["max"]
-
-
-def test_unknown_category_share_menghitung_dukungan_rendah():
-    snapshot = pd.DataFrame({
-        "item_model_code_clean": ["A", "A", "B", None, "C"],
-    })
-    support = {"A": config.MIN_PART_MODEL_SUPPORT + 100, "B": 5}
-    result = monitoring_service._unknown_category_share(snapshot, support)
-    assert result["unknown_or_low_support_parts"] == 3
-    assert result["unknown_or_low_support_share"] == pytest.approx(0.6)
-    assert result["distinct_model_codes_active"] == 3
-    assert result["distinct_model_codes_in_training"] == 2
-
-
-def test_unknown_category_share_semua_dikenal():
-    snapshot = pd.DataFrame({"item_model_code_clean": ["A", "A", "B"]})
-    support = {"A": 1000, "B": 1000}
-    result = monitoring_service._unknown_category_share(snapshot, support)
-    assert result["unknown_or_low_support_share"] == 0.0
-
-
-def test_feature_summary_mengabaikan_kolom_yang_tidak_ada():
-    snapshot = pd.DataFrame({"days_since_installation": [10.0, 20.0, np.nan]})
-    result = monitoring_service._feature_summary(snapshot)
-    assert "days_since_installation" in result
-    assert result["days_since_installation"]["missing_share"] == pytest.approx(1 / 3, abs=1e-4)
-    assert "prior_failure_count" not in result
-
-
-def test_feature_summary_kolom_seluruhnya_kosong_tidak_meledak():
-    snapshot = pd.DataFrame({"days_since_installation": [np.nan, np.nan]})
-    result = monitoring_service._feature_summary(snapshot)
-    assert "days_since_installation" not in result
-
-
-@needs_database
-@needs_models
-def test_failure_monitoring_memisahkan_offline_dan_live():
-    result = monitoring_service.failure_monitoring()
-    assert set(result.keys()) == {"offline", "live"}
-
-    offline = result["offline"]
-    assert offline["model_version"]
-    assert "roc_auc" in offline["test_metrics"]
-    assert "pr_auc" in offline["test_metrics"]
-
-    live = result["live"]
-    assert live["active_parts"] > 0
-    assert live["risk_level_counts"]["HIGH"] >= 0
-    assert "roc_auc" not in live
-    assert "pr_auc" not in live
-
-
-@needs_database
-@needs_models
-def test_jumlah_high_live_dan_expected_konsisten_secara_struktur():
-    result = monitoring_service.failure_monitoring()
-    live = result["live"]
-    total = sum(live["risk_level_counts"].values())
-    assert total == live["active_parts"]
-    if live["expected_high_from_training"]:
-
-        assert live["high_count_ratio_vs_training"] == pytest.approx(
-            live["risk_level_counts"]["HIGH"] / live["expected_high_from_training"], abs=5e-4
-        )
-
-
-@needs_database
-@needs_models
-def test_endpoint_monitoring_metrics(client):
-    response = client.get("/api/v1/monitoring/metrics")
-    assert response.status_code == 200
-    body = response.json()
-    assert "failure" in body
-
-
-@needs_database
-@needs_models
-def test_endpoint_monitoring_terpisah_per_model(client):
-    failure_only = client.get("/api/v1/monitoring/metrics/failure").json()
-    assert "offline" in failure_only and "live" in failure_only
-
-
 def _terminal_raw(rows: list[dict]) -> pd.DataFrame:
     base = {
         "terminal_serial_code_clean": None,
@@ -573,206 +475,43 @@ def test_terminal_summary_kosong_kalau_tidak_ada_part_dengan_terminal():
     assert summary.empty
 
 
-@pytest.fixture
-def isolated_cache(monkeypatch):
-
-    directory = Path(tempfile.mkdtemp(prefix="geocode_test_"))
-    monkeypatch.setattr(gs, "CACHE_PATH", directory / "geocode.json")
-    monkeypatch.setattr(gs, "_last_request_at", 0.0)
-    yield
-    shutil.rmtree(directory, ignore_errors=True)
-
-
-def _fake_response(payload: list[dict]):
-    class _Response:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return payload
-
-    return _Response()
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_nama_stasiun_lolos_saringan_pola():
-    assert gs._looks_like_public_station("STASIUN JUANDA")
-    assert gs._looks_like_public_station("stasiun juanda")
-    assert gs._looks_like_public_station("BATU CEPER (KA BANDARA)")
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_fasilitas_internal_ditolak_sebelum_ke_jaringan():
-    for name in ("GUDANG NI", "SERVICE CENTER", "DIPO DEPOK", "IT KCI JUANDA"):
-        assert not gs._looks_like_public_station(name), name
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_fasilitas_internal_tidak_pernah_memanggil_nominatim(monkeypatch):
-    called = []
-    monkeypatch.setattr(gs.requests, "get", lambda *a, **k: called.append(1) or _fake_response([]))
-
-    entry = gs._resolve_one("GUDANG NI")
-
-    assert called == []
-    assert entry["resolved"] is False
-    assert "bukan nama stasiun publik" in entry["reason"]
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_kalimat_pencarian_membuang_akhiran_ka_bandara():
-    assert gs._search_query("BATU CEPER (KA BANDARA)") == "Stasiun BATU CEPER"
-    assert gs._search_query("STASIUN JUANDA") == "STASIUN JUANDA"
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_hasil_di_luar_indonesia_ditolak(monkeypatch):
-
-    bangkok = [{"lat": "13.7563", "lon": "100.5018", "display_name": "Bangkok"}]
-    monkeypatch.setattr(gs, "_query_nominatim", lambda name: bangkok)
-
-    entry = gs._resolve_one("STASIUN TIDAK_DIKENAL")
-
-    assert entry["resolved"] is False
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_hasil_di_dalam_jabodetabek_diterima(monkeypatch):
-    jakarta = [{"lat": "-6.1667", "lon": "106.8305", "display_name": "Juanda, Jakarta"}]
-    monkeypatch.setattr(gs, "_query_nominatim", lambda name: jakarta)
-
-    entry = gs._resolve_one("STASIUN JUANDA")
-
-    assert entry["resolved"] is True
-    assert entry["lat"] == pytest.approx(-6.1667)
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_hasil_di_luar_jabodetabek_tapi_dalam_indonesia_diterima(monkeypatch):
-
-    medan = [{"lat": "3.5952", "lon": "98.6722", "display_name": "Binjai, Sumatera Utara"}]
-    monkeypatch.setattr(gs, "_query_nominatim", lambda name: medan)
-
-    entry = gs._resolve_one("STASIUN BINJAI")
-
-    assert entry["resolved"] is True
-    assert entry["lat"] == pytest.approx(3.5952)
-    assert entry["lon"] == pytest.approx(98.6722)
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_kandidat_pertama_di_luar_kotak_kandidat_kedua_di_dalam(monkeypatch):
-    candidates = [
-        {"lat": "13.7563", "lon": "100.5018", "display_name": "Salah, Bangkok"},
-        {"lat": "-6.1667", "lon": "106.8305", "display_name": "Benar, Jakarta"},
-    ]
-    monkeypatch.setattr(gs, "_query_nominatim", lambda name: candidates)
-
-    entry = gs._resolve_one("STASIUN JUANDA")
-
-    assert entry["resolved"] is True
-    assert "Benar" in entry["matched_name"]
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_tidak_ada_kandidat_sama_sekali(monkeypatch):
-    monkeypatch.setattr(gs, "_query_nominatim", lambda name: [])
-    entry = gs._resolve_one("STASIUN JUANDA")
-    assert entry["resolved"] is False
-    assert entry["retry"] is False
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_kegagalan_jaringan_ditandai_boleh_dicoba_lagi(monkeypatch):
-    import requests
-
-    def boom(name):
-        raise requests.RequestException("timeout")
-
-    monkeypatch.setattr(gs, "_query_nominatim", boom)
-    entry = gs._resolve_one("STASIUN JUANDA")
-    assert entry["resolved"] is False
-    assert entry["retry"] is True
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_lokasi_yang_sudah_di_cache_tidak_dicoba_lagi(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        gs, "_resolve_one",
-        lambda name: (calls.append(name), {"resolved": True, "lat": 0.0, "lon": 0.0})[1],
-    )
-
-    gs.resolve_missing(["STASIUN A"], budget_seconds=10)
-    assert calls == ["STASIUN A"]
-
-    gs.resolve_missing(["STASIUN A"], budget_seconds=10)
-    assert calls == ["STASIUN A"], "lokasi yang sudah berhasil di-cache dipanggil lagi"
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_kegagalan_boleh_dicoba_lagi_lain_kali(monkeypatch):
-    monkeypatch.setattr(gs, "_resolve_one", lambda name: {"resolved": False, "retry": True})
-
-    gs.resolve_missing(["STASIUN GAGAL"], budget_seconds=10)
-    gs.resolve_missing(["STASIUN GAGAL"], budget_seconds=10)
-
-    entry = gs.known_coordinates(["STASIUN GAGAL"])["STASIUN GAGAL"]
-    assert entry["retry"] is True
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_anggaran_waktu_menghentikan_lebih_awal(monkeypatch):
-    import time as time_module
-
-    def slow_resolve(name):
-        time_module.sleep(0.05)
-        return {"resolved": True, "lat": 0.0, "lon": 0.0}
-
-    monkeypatch.setattr(gs, "_resolve_one", slow_resolve)
-
-    processed = gs.resolve_missing(
-        [f"STASIUN {i}" for i in range(100)], budget_seconds=0.12
-    )
-    assert 0 < processed < 100
-
-
-@pytest.mark.usefixtures("isolated_cache")
-def test_koordinat_yang_belum_pernah_dicoba_kembalikan_none():
-    result = gs.known_coordinates(["STASIUN BELUM_PERNAH_DICOBA"])
-    assert result["STASIUN BELUM_PERNAH_DICOBA"] is None
-
-
-def test_lokasi_dengan_risiko_tinggi_berwarna_merah():
-    assert ui.risk_marker_color(high_risk_parts=3, medium_risk_parts=5) == ui.MAP_HIGH_COLOR
-
-
-def test_lokasi_hanya_risiko_sedang_berwarna_oranye():
-    assert ui.risk_marker_color(high_risk_parts=0, medium_risk_parts=2) == ui.MAP_MEDIUM_COLOR
-
-
-def test_lokasi_tanpa_risiko_tinggi_sedang_berwarna_biru():
-    assert ui.risk_marker_color(high_risk_parts=0, medium_risk_parts=0) == ui.MAP_LOW_COLOR
-
-
-def test_risiko_tinggi_menang_atas_risiko_sedang():
-    assert ui.risk_marker_color(high_risk_parts=1, medium_risk_parts=10) == ui.MAP_HIGH_COLOR
-
-
-def test_radius_naik_mengikuti_jumlah_risiko_tinggi():
-    small = ui.risk_marker_radius(high_risk_parts=0)
-    big = ui.risk_marker_radius(high_risk_parts=10)
-    assert big > small
-
-
-def test_radius_selalu_positif_walau_tanpa_risiko():
-    assert ui.risk_marker_radius(high_risk_parts=0) > 0
-
-
-def test_warna_adalah_rgba_valid():
-    for color in (ui.MAP_HIGH_COLOR, ui.MAP_MEDIUM_COLOR, ui.MAP_LOW_COLOR):
-        assert len(color) == 4
-        assert all(0 <= channel <= 255 for channel in color)
+def test_terminal_part_summary_mengelompokkan_per_model_dalam_satu_terminal():
+    frame = _scored_frame([
+        {
+            "item_id": "A", "terminal_id": "1", "item_model_code": "0521201",
+            "failure_risk_level": "HIGH", "alert_status": "OPEN",
+        },
+        {
+            "item_id": "B", "terminal_id": "1", "item_model_code": "0521201",
+            "failure_risk_level": "LOW", "alert_status": pd.NA,
+        },
+        {
+            "item_id": "C", "terminal_id": "1", "item_model_code": "0720301",
+            "failure_risk_level": "MEDIUM", "alert_status": pd.NA,
+        },
+        {"item_id": "D", "terminal_id": "2", "item_model_code": "0521201"},
+    ])
+    summary = data_state.terminal_part_summary(frame, "1")
+    assert len(summary) == 2
+    row = summary.loc["0521201"]
+    assert row["installed_count"] == 2
+    assert row["high_risk_parts"] == 1
+    assert row["open_alert_count"] == 1
+
+
+def test_terminal_part_summary_kosong_kalau_terminal_tidak_ditemukan():
+    frame = _scored_frame([{"item_id": "A", "terminal_id": "1", "item_model_code": "0521201"}])
+    summary = data_state.terminal_part_summary(frame, "TIDAK-ADA")
+    assert summary.empty
+
+
+def test_filter_scores_part_type_menyaring_model_tertentu():
+    frame = _scored_frame([
+        {"item_id": "A", "item_model_code": "0521201", "in_official_queue": False},
+        {"item_id": "B", "item_model_code": "0720301", "in_official_queue": False},
+    ])
+    result = data_state.filter_scores(frame, part_type="0521201", official_queue_only=False)
+    assert result["item_id"].tolist() == ["A"]
 
 
 PAGES = [
@@ -820,16 +559,15 @@ def route_dashboard_to_testclient(monkeypatch, client):
     api_client.recommendations.clear()
     api_client.assessment.clear()
     api_client.history.clear()
-    api_client.locations_map.clear()
     api_client.model_info.clear()
-    api_client.monitoring_metrics.clear()
     api_client.terminals.clear()
+    api_client.terminal_parts.clear()
+    api_client.terminal_part_items.clear()
     yield
 
 
 @needs_database
 @needs_models
-@needs_internet
 @pytest.mark.usefixtures("route_dashboard_to_testclient")
 @pytest.mark.parametrize("page", PAGES, ids=lambda path: path.stem)
 def test_halaman_bisa_dirender(page):
@@ -845,7 +583,6 @@ def test_halaman_bisa_dirender(page):
 
 @needs_database
 @needs_models
-@needs_internet
 @pytest.mark.usefixtures("route_dashboard_to_testclient")
 def test_detail_part_menampilkan_angka(scorable_item):
     from streamlit.testing.v1 import AppTest
@@ -866,46 +603,6 @@ def test_detail_part_menampilkan_angka(scorable_item):
 
 @needs_database
 @needs_models
-@needs_internet
-@pytest.mark.usefixtures("route_dashboard_to_testclient")
-def test_filter_lokasi_terisi_dari_map_location_filter_dan_bertahan_setelah_rerun_lain():
-    """`st.session_state["map_location_filter"]` (diisi oleh tab Peta di halaman
-    Inspeksi) mengisi filter Lokasi di halaman Parts, dan filter itu harus
-    tetap bertahan walau ada rerun lain (mis. ganti Horizon) - sebelumnya
-    selectbox tanpa `key` reset ke 'Semua' pada rerun berikutnya karena
-    `map_location_filter` sudah di-pop pada rerun pertama."""
-    from streamlit.testing.v1 import AppTest
-
-    app = AppTest.from_file(str(DASHBOARD_DIR / "pages" / "1_Parts.py"), default_timeout=300)
-    app.session_state["authenticated"] = True
-    app = app.run()
-    assert not app.exception
-
-    location_box = next((box for box in app.selectbox if box.label == "Lokasi"), None)
-    if location_box is None or len(location_box.options) <= 1:
-        pytest.skip("tidak ada data lokasi untuk diuji")
-    available_location = location_box.options[1]
-
-    app.session_state["map_location_filter"] = available_location
-    app = app.run()
-    location_box = next(box for box in app.selectbox if box.label == "Lokasi")
-    assert location_box.value == available_location
-    assert "map_location_filter" not in app.session_state
-
-    official_toggle = next(
-        box for box in app.toggle if box.label == "Antrian dengan risiko tinggi"
-    )
-    app = official_toggle.set_value(not official_toggle.value).run()
-
-    location_box = next(box for box in app.selectbox if box.label == "Lokasi")
-    assert location_box.value == available_location, (
-        "filter lokasi tidak seharusnya reset ke 'Semua' hanya karena widget lain berubah"
-    )
-
-
-@needs_database
-@needs_models
-@needs_internet
 @pytest.mark.usefixtures("route_dashboard_to_testclient")
 def test_detail_part_menjelaskan_yang_tidak_bisa_diskor(not_scorable_item):
     from streamlit.testing.v1 import AppTest

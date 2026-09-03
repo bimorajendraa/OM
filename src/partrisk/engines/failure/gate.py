@@ -131,21 +131,7 @@ def lifecycle_metrics(dataset: pd.DataFrame, scores: np.ndarray, threshold: floa
 def select_lifecycle_threshold(
     dataset: pd.DataFrame, scores: np.ndarray, target_precision: float = 0.85,
 ) -> dict:
-    """Cari threshold yang MEMAKSIMALKAN recall lifecycle dengan syarat
-    presisi lifecycle >= target_precision - metodologi sama seperti
-    `select_precision_constrained_threshold()` (dicari HANYA di split yang
-    diberikan, diuji sekali jujur di split lain lewat `lifecycle_metrics()`
-    langsung), hanya metrik dasarnya diganti ke tingkat lifecycle.
-
-    WHY: kandidat threshold = NILAI SKOR UNIK yang benar-benar muncul,
-    BUKAN grid quantile - kalibrator isotonic biasanya cuma menghasilkan
-    puluhan nilai unik dan yang paling berguna sering di baris paling
-    jarang (mis. hanya 26/49.660 baris VALIDATION >= 0,375 pada model v4).
-    Grid quantile merata melewatkan celah sesempit itu (percentile gap-nya
-    lebih lebar dari spacing grid), diam-diam melompat ke threshold
-    degenerate berikutnya - persis bug yang ditemukan saat menguji fungsi
-    ini pertama kali.
-    """
+  
     candidates = np.unique(np.asarray(scores))
     best_feasible: dict | None = None
     best_precision_overall = 0.0

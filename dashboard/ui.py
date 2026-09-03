@@ -55,6 +55,9 @@ COLUMN_LABELS = {
     "low_risk_parts": "RISIKO RENDAH",
     "top_risk_item_id": "PART PALING BERISIKO",
     "top_risk_probability": "PELUANG 30H",
+    "part_type": "JENIS PART (MODEL)",
+    "installed_count": "TERPASANG",
+    "open_alert_count": "ALERT TERBUKA",
     "date": "TANGGAL",
     "status": "STATUS",
     "wo_type": "JENIS WO",
@@ -68,8 +71,6 @@ BULAN_ID = {
     7: "Jul", 8: "Agu", 9: "Sep", 10: "Okt", 11: "Nov", 12: "Des",
 }
 
-# Primary navigation, in display order. Part Detail and Sistem are reached
-# by drill-down / secondary link and are intentionally excluded here.
 NAV_PAGES = [
     ("app.py", "Ringkasan", ":material/space_dashboard:"),
     ("pages/1_Parts.py", "Parts", ":material/list_alt:"),
@@ -593,18 +594,3 @@ def capture_curve_chart(curve: pd.DataFrame, capacity: int) -> alt.LayerChart:
     return (actual + random_line + rule_chart).properties(height=220)
 
 
-MAP_HIGH_COLOR = [180, 35, 24, 205]
-MAP_MEDIUM_COLOR = [148, 98, 0, 195]
-MAP_LOW_COLOR = [35, 122, 75, 175]
-
-
-def risk_marker_color(high_risk_parts: int, medium_risk_parts: int) -> list[int]:
-    if high_risk_parts > 0:
-        return MAP_HIGH_COLOR
-    if medium_risk_parts > 0:
-        return MAP_MEDIUM_COLOR
-    return MAP_LOW_COLOR
-
-
-def risk_marker_radius(high_risk_parts: int) -> int:
-    return 120 + int(high_risk_parts) * 60

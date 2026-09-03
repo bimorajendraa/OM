@@ -26,19 +26,17 @@ from partrisk.serving.single import (
     PartNotFound,
     PartNotScorable,
 )
-from partrisk.api import services as geocoding_service
-from partrisk.api import services as monitoring_service
 from partrisk.api.schemas import (
     AssessmentResponse,
     FailureResponse,
     FiltersResponse,
     HealthResponse,
     HistoryResponse,
-    LocationMapResponse,
     OverviewResponse,
     RecommendationListResponse,
     ResolveAlertResponse,
     TerminalListResponse,
+    TerminalPartListResponse,
 )
 
 
@@ -77,9 +75,6 @@ WARMUP_BATCH_ON_STARTUP = os.getenv("WARMUP_BATCH_ON_STARTUP", "false").lower() 
 )
 
 MAX_RECOMMENDATION_LIMIT = config._int("MAX_RECOMMENDATION_LIMIT", 500)
-
-GEOCODE_BUDGET_SECONDS_DEFAULT = config._int("GEOCODE_BUDGET_SECONDS_DEFAULT", 60)
-GEOCODE_BUDGET_SECONDS_MAX = config._int("GEOCODE_BUDGET_SECONDS_MAX", 90)
 
 CORS_ALLOW_ORIGINS = [
     origin.strip()
@@ -166,13 +161,6 @@ API_VERSION = "1.0.0"
 
 @health_router.get("/health", response_model=HealthResponse)
 def health(check_database: bool = False) -> dict:
-    """Status aplikasi.
-
-    Pemeriksaan database TIDAK dijalankan secara default: /health sering
-    dipanggil health checker setiap beberapa detik, dan satu query per
-    panggilan hanya membebani database tanpa menambah informasi. Pakai
-    ?check_database=true kalau memang ingin memastikan koneksinya hidup.
-    """
     try:
         versions: dict[str, str | None] = dict(serving.versions())
         model_ok = True
@@ -211,11 +199,6 @@ model_info_router = APIRouter(prefix="/api/v1", tags=["model"])
 
 @model_info_router.get("/model")
 def model_info() -> dict:
-    """Versi, target, fitur, ambang risiko, dan metrik uji model kerusakan.
-
-    Seluruhnya dibaca dari metadata.json yang ditulis train.py - tidak ada
-    angka yang dihitung ulang di sini.
-    """
     return serving.describe()
 
 
@@ -251,24 +234,11 @@ def failure(item_id: str = _ITEM_ID) -> dict:
 
 @prediction_router.get("/{item_id}/history", response_model=HistoryResponse)
 def history(item_id: str = _ITEM_ID) -> dict:
-    """Tanggal kerusakan dan lokasi yang pernah tercatat untuk satu PART.
-
-    Dari catatan event apa adanya, bukan dihitung ulang - mendukung faktor
-    risiko di /assessment yang berupa hitungan (mis. "2 kerusakan dalam 365
-    hari terakhir") dengan tanggal sesungguhnya.
-    """
     return serving.item_history(item_id)
 
 
 @prediction_router.post("/{item_id}/resolve-alert", response_model=ResolveAlertResponse)
 def resolve_alert(item_id: str = _ITEM_ID) -> dict:
-    """Tandai alert PART ini selesai diinspeksi/dimaintenance.
-
-    Dipanggil tim ops setelah inspeksi/perbaikan selesai - PART keluar dari
-    antrian resmi sampai siklus batch berikutnya menilainya ulang dari data
-    terbaru, dan hanya masuk lagi (alert baru) kalau memang masih memenuhi
-    aturan risiko.
-    """
     return serving.resolve_alert(item_id)
 
 
@@ -374,15 +344,6 @@ def filters() -> dict:
 
 @recommendations_router.get("/terminals", response_model=TerminalListResponse)
 def terminals() -> dict:
-    """Ringkasan risiko per Terminal, dari AGREGASI prediction PART yang
-    sudah ada - bukan model baru khusus Terminal (docs/DECISIONS.md §14).
-
-    Pakai `terminal_id` hasil di sini sebagai filter `/recommendations`
-    untuk melihat seluruh PART dalam satu Terminal. `parts_without_terminal`
-    dilaporkan APA ADANYA - PART yang relasi parent-Terminal-nya di database
-    tidak bisa dipastikan (lihat `data_reader.get_terminal_context`) TIDAK
-    dipaksakan masuk kelompok manapun.
-    """
     scores = serving_batch.score_active_parts()
     overview_counts = serving_batch.terminal_overview(scores.frame)
     summary = serving_batch.terminal_summary(scores.frame)
@@ -399,71 +360,48 @@ def terminals() -> dict:
     }
 
 
-locations_router = APIRouter(prefix="/api/v1", tags=["locations"])
-
-
-@locations_router.get("/locations/map", response_model=LocationMapResponse)
-def locations_map(
-    resolve: bool = Query(
-        True,
-        description=(
-            "Coba geocode lokasi yang belum ada di cache. Matikan untuk "
-            "jawaban instan dari cache saja."
-        ),
-    ),
-    budget_seconds: float = Query(
-        GEOCODE_BUDGET_SECONDS_DEFAULT,
-        ge=0,
-        description="Anggaran waktu untuk geocoding lokasi baru pada panggilan ini.",
-    ),
-) -> dict:
-    """Ringkasan risiko per lokasi, dipasangkan dengan koordinat kalau ada.
-
-    Cache geocoding disk mengingat lokasi yang sudah pernah dicoba, jadi
-    panggilan berikutnya untuk lokasi yang sama tidak memanggil jaringan lagi.
-    Lokasi baru (belum pernah dicoba) di-geocode di sini, dibatasi
-    `budget_seconds` supaya satu request tidak menggantung lama; sisanya baru
-    diproses pada panggilan berikutnya.
-    """
+@recommendations_router.get(
+    "/terminals/{terminal_id}/parts", response_model=TerminalPartListResponse
+)
+def terminal_parts(terminal_id: str) -> dict:
     scores = serving_batch.score_active_parts()
-    summary = serving_batch.location_summary(scores.frame)
-    locations = summary.index.tolist()
-
-    if resolve and locations:
-        capped = min(budget_seconds, GEOCODE_BUDGET_SECONDS_MAX)
-        geocoding_service.resolve_missing(locations, budget_seconds=capped)
-
-    coordinates = geocoding_service.known_coordinates(locations)
-
-    resolved, unresolved = [], []
-    for location, row in summary.iterrows():
-        counts = row.to_dict()
-        entry = coordinates.get(location)
-        if entry and entry.get("resolved"):
-            resolved.append({"location": location, "lat": entry["lat"], "lon": entry["lon"], **counts})
-        else:
-            checked = entry is not None and not entry.get("retry")
-            unresolved.append({"location": location, "checked": checked, **counts})
-
+    summary = serving_batch.terminal_part_summary(scores.frame, terminal_id)
+    rows = summary.reset_index().to_dict(orient="records")
     return {
-        "resolved": resolved,
-        "unresolved": unresolved,
+        "terminal_id": terminal_id,
+        "parts": [
+            {key: (None if pd.isna(value) else value) for key, value in row.items()}
+            for row in rows
+        ],
         "scored_at": scores.scored_at,
     }
 
 
-monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["monitoring"])
-
-
-@monitoring_router.get("/metrics")
-def metrics() -> dict:
-    """Snapshot metrik monitoring model kerusakan."""
-    return monitoring_service.summary()
-
-
-@monitoring_router.get("/metrics/failure")
-def failure_metrics() -> dict:
-    return monitoring_service.failure_monitoring()
+@recommendations_router.get(
+    "/terminals/{terminal_id}/parts/{part_type}", response_model=RecommendationListResponse
+)
+def terminal_part_items(
+    terminal_id: str,
+    part_type: str,
+    limit: int = Query(DEFAULT_RECOMMENDATION_LIMIT, ge=1),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    limit = min(limit, MAX_RECOMMENDATION_LIMIT)
+    scores = serving_batch.score_active_parts()
+    selected = serving_batch.filter_scores(
+        scores.frame,
+        terminal_id=terminal_id,
+        part_type=part_type,
+        official_queue_only=False,
+    )
+    page = selected.iloc[offset : offset + limit]
+    return {
+        "total": int(len(selected)),
+        "returned": int(len(page)),
+        "offset": offset,
+        "scored_at": scores.scored_at,
+        "items": _rows(page),
+    }
 
 
 DESCRIPTION = """
@@ -518,8 +456,6 @@ app.include_router(health_router)
 app.include_router(model_info_router, dependencies=[Depends(require_api_key)])
 app.include_router(prediction_router, dependencies=[Depends(require_api_key)])
 app.include_router(recommendations_router, dependencies=[Depends(require_api_key)])
-app.include_router(locations_router, dependencies=[Depends(require_api_key)])
-app.include_router(monitoring_router, dependencies=[Depends(require_api_key)])
 
 
 @app.exception_handler(PartNotFound)

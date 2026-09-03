@@ -3,9 +3,8 @@ from __future__ import annotations
 import pytest
 
 from partrisk.core import config
-from partrisk.api import services as geocoding_service
 from partrisk.serving import alerts as alert_store
-from tests.conftest import needs_database, needs_internet, needs_models
+from tests.conftest import needs_database, needs_models
 
 pytestmark = [needs_database, needs_models]
 
@@ -289,6 +288,46 @@ def test_recommendations_terminal_id_menyaring_ke_satu_terminal(client):
     assert all(item["terminal_id"] == target["terminal_id"] for item in body["items"])
 
 
+def test_endpoint_terminal_parts_level_2(client):
+    terminals = client.get("/api/v1/terminals").json()["terminals"]
+    if not terminals:
+        pytest.skip("Tidak ada Terminal dengan PART aktif di database saat ini.")
+    target = terminals[0]
+    body = client.get(f"/api/v1/terminals/{target['terminal_id']}/parts").json()
+    assert body["terminal_id"] == target["terminal_id"]
+    assert sum(p["installed_count"] for p in body["parts"]) == target["active_parts"]
+    for part in body["parts"]:
+        assert part["installed_count"] == (
+            part["high_risk_parts"] + part["medium_risk_parts"] + part["low_risk_parts"]
+        )
+
+
+def test_endpoint_terminal_parts_terminal_tidak_ada_mengembalikan_kosong(client):
+    body = client.get("/api/v1/terminals/TIDAK-PERNAH-ADA/parts").json()
+    assert body == {
+        "terminal_id": "TIDAK-PERNAH-ADA", "parts": [], "scored_at": body["scored_at"],
+    }
+
+
+def test_endpoint_terminal_part_items_level_3(client):
+    terminals = client.get("/api/v1/terminals").json()["terminals"]
+    if not terminals:
+        pytest.skip("Tidak ada Terminal dengan PART aktif di database saat ini.")
+    target = terminals[0]
+    parts = client.get(f"/api/v1/terminals/{target['terminal_id']}/parts").json()["parts"]
+    if not parts:
+        pytest.skip("Terminal ini tidak punya Part Type untuk diuji.")
+    part_type = parts[0]["part_type"]
+
+    body = client.get(
+        f"/api/v1/terminals/{target['terminal_id']}/parts/{part_type}"
+    ).json()
+    assert body["total"] == parts[0]["installed_count"]
+    for item in body["items"]:
+        assert item["terminal_id"] == target["terminal_id"]
+        assert item["item_model_code"] == part_type
+
+
 def test_antrian_resmi_subset_dari_mode_eksplorasi(client):
 
     official = client.get(
@@ -349,54 +388,3 @@ def test_assessment_cocok_dengan_daftar_prioritas(client):
         assert detail["failure"][column] == listed[column]
     assert detail["failure"]["risk_level"] == listed["failure_risk_level"]
     assert detail["recommendation"]["action"] == listed["recommended_action"]
-
-
-@pytest.fixture(scope="module")
-def location_response(client):
-    result = client.get(
-        "/api/v1/locations/map", params={"resolve": True, "budget_seconds": 8}
-    )
-    assert result.status_code == 200
-    return result.json()
-
-
-@needs_internet
-def test_bentuk_jawaban(location_response):
-    assert "resolved" in location_response
-    assert "unresolved" in location_response
-    assert location_response["scored_at"]["data_through"]
-
-
-@needs_internet
-def test_titik_yang_ditampilkan_selalu_di_dalam_indonesia(location_response):
-    box = geocoding_service.INDONESIA_BBOX
-    for item in location_response["resolved"]:
-        assert box["south"] <= item["lat"] <= box["north"], item
-        assert box["west"] <= item["lon"] <= box["east"], item
-
-
-@needs_internet
-def test_setiap_lokasi_punya_hitungan_risiko(location_response):
-    for item in location_response["resolved"] + location_response["unresolved"]:
-        assert item["active_parts"] >= 1
-        assert item["high_risk_parts"] >= 0
-        assert item["medium_risk_parts"] >= 0
-
-
-@needs_internet
-def test_tanpa_resolve_tidak_mengubah_cache(client):
-    before = client.get(
-        "/api/v1/locations/map", params={"resolve": False}
-    ).json()
-    after = client.get(
-        "/api/v1/locations/map", params={"resolve": False}
-    ).json()
-    assert len(before["resolved"]) == len(after["resolved"])
-    assert len(before["unresolved"]) == len(after["unresolved"])
-
-
-@needs_internet
-def test_fasilitas_internal_tidak_pernah_muncul_sebagai_pin(location_response):
-    resolved_names = {item["location"] for item in location_response["resolved"]}
-    for internal_name in ("GUDANG NI", "SERVICE CENTER", "DIPO DEPOK"):
-        assert internal_name not in resolved_names

@@ -51,20 +51,17 @@ with st.container(border=True):
 
     filter_cols = st.columns(4)
 
-    def choice(key: str, label: str, options: list[str], default: str | None = None) -> str | None:
+    def choice(key: str, label: str, options: list[str]) -> str | None:
         values = ["Semua", *options]
-        if default is not None and default in values:
-            st.session_state[key] = default
-        elif st.session_state.get(key) not in values:
+        if st.session_state.get(key) not in values:
             st.session_state[key] = "Semua"
         selected = st.selectbox(label, values, key=key)
         return None if selected == "Semua" else selected
 
-    default_location = st.session_state.pop("map_location_filter", None)
     with filter_cols[0]:
         item_type = choice("filter_item_type", "Jenis PART", available["item_types"])
     with filter_cols[1]:
-        location = choice("filter_location", "Lokasi", available["locations"], default_location)
+        location = choice("filter_location", "Lokasi", available["locations"])
     with filter_cols[2]:
         client = choice("filter_client", "Client", available["clients"])
     with filter_cols[3]:

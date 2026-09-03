@@ -295,6 +295,7 @@ def describe() -> dict:
             "cutoff_basis": failure["cutoff_basis"],
             "test_metrics": failure["evaluation_metrics"]["test"],
             "data_through": failure["training_period"]["dataset_max_event_on"],
+            "gate": failure.get("gate"),
         },
         "notes": {
             "failure_probability": (
