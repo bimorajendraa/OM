@@ -12,7 +12,6 @@ import requests
 
 from partrisk.core import config
 from partrisk.engines import predict as failure_model
-from partrisk.engines import predict as scrap_model
 from partrisk.serving import alerts as alert_store
 from partrisk.serving import batch as serving_batch
 
@@ -261,45 +260,7 @@ def failure_monitoring() -> dict:
     return {"offline": offline, "live": live}
 
 
-def scrap_monitoring() -> dict:
-    metadata = scrap_model.load_scrap_model()[2]
-    scores = serving_batch.score_active_parts()
-    frame = scores.frame
-
-    offline = {
-        "model_version": metadata["model_version"],
-        "training_date": metadata["training_date"],
-        "evaluation_metrics": metadata["evaluation_metrics"],
-        "cutoff_basis": metadata["cutoff_basis"],
-        "last_promotion_comparison": metadata.get("promotion_comparison"),
-    }
-
-    scrap_probability = frame["scrap_probability"].dropna().to_numpy(dtype=float)
-    known_types = set(metadata["known_item_types"])
-    item_types = frame["item_type"].dropna()
-    unknown_types = ~item_types.isin(known_types)
-
-    live = {
-        "parts_with_scrap_score": int(len(scrap_probability)),
-        "predicted_scrap_probability_distribution": _score_distribution(scrap_probability),
-        "predicted_scrap_probability_mean": (
-            round(float(scrap_probability.mean()), 4) if len(scrap_probability) else None
-        ),
-        "risk_level_counts": {
-            str(name): int(count)
-            for name, count in frame["scrap_risk_level"].value_counts().items()
-        },
-        "unknown_item_type_share": (
-            round(float(unknown_types.mean()), 4) if len(item_types) else 0.0
-        ),
-        "data_through": str(scores.data_end),
-    }
-
-    return {"offline": offline, "live": live}
-
-
 def summary() -> dict:
     return {
         "failure": failure_monitoring(),
-        "scrap": scrap_monitoring(),
     }

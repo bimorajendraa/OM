@@ -4,5 +4,4 @@ __pycache__/
 catboost_info/
 .pytest_cache/
 .cache/
-models/survival/v*/*.joblib
 .baseline/

@@ -55,8 +55,6 @@ ui.priority_table(
         "location",
         "failure_risk_level",
         "failure_probability_30d",
-        "days_until_survival_90pct",
-        "estimasi_bulan_rusak",
         "recommended_action",
     ],
     empty_message="Tidak ada PART yang perlu ditindaklanjuti saat ini.",

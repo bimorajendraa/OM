@@ -86,7 +86,6 @@ if selected_terminal_id and any(t["terminal_id"] == selected_terminal_id for t i
         ("PART aktif", f"{terminal.get('active_parts', 0):,}", True),
         ("Risiko tinggi", f"{terminal.get('high_risk_parts', 0):,}", True),
         ("Risiko sedang", f"{terminal.get('medium_risk_parts', 0):,}", True),
-        ("Kandidat penggantian", f"{terminal.get('replacement_candidates', 0):,}", True),
     ])
 
     try:
@@ -112,8 +111,6 @@ if selected_terminal_id and any(t["terminal_id"] == selected_terminal_id for t i
             "item_type",
             "failure_risk_level",
             "failure_probability_30d",
-            "days_until_survival_90pct",
-            "estimasi_bulan_rusak",
             "recommended_action",
         ],
         empty_message="Terminal ini belum memiliki PART aktif yang bisa dinilai.",

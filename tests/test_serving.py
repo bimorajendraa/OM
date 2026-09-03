@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import itertools
 import shutil
 import sys
 import tempfile
@@ -23,7 +22,6 @@ from partrisk.serving import batch as query_cache
 from partrisk.serving.single import (
     PRIORITY_ORDER,
     RISK_LEVELS,
-    is_replacement_candidate,
     recommend,
 )
 from tests.conftest import needs_database, needs_internet, needs_models
@@ -35,58 +33,26 @@ if str(DASHBOARD_DIR) not in sys.path:
 import ui  # noqa: E402
 
 
-def test_setiap_kombinasi_risiko_punya_rekomendasi():
-    for failure_level, scrap_level in itertools.product(RISK_LEVELS, RISK_LEVELS):
-        decision = recommend(failure_level, scrap_level)
+def test_setiap_kelompok_risiko_punya_rekomendasi():
+    for failure_level in RISK_LEVELS:
+        decision = recommend(failure_level)
         assert decision["priority"] in PRIORITY_ORDER
         assert decision["action"]
         assert decision["message"]
-        assert decision["based_on"] == {
-            "failure_risk_level": failure_level,
-            "scrap_risk_level": scrap_level,
-        }
-
-
-def test_risiko_scrap_boleh_kosong():
-    for failure_level in RISK_LEVELS:
-        decision = recommend(failure_level, None)
-        assert decision["based_on"]["scrap_risk_level"] is None
-        assert "scrap belum bisa dinilai" in decision["message"]
+        assert decision["based_on"] == {"failure_risk_level": failure_level}
 
 
 def test_kelompok_risiko_tidak_dikenal_ditolak():
     with pytest.raises(ValueError):
-        recommend("SANGAT_TINGGI", "LOW")
-    with pytest.raises(ValueError):
-        recommend("HIGH", "EXTREME")
+        recommend("SANGAT_TINGGI")
 
 
 def test_prioritas_naik_mengikuti_risiko_kerusakan():
-    for scrap_level in (*RISK_LEVELS, None):
-        ranks = [
-            PRIORITY_ORDER[recommend(failure_level, scrap_level)["priority"]]
-            for failure_level in ("LOW", "MEDIUM", "HIGH")
-        ]
-        assert ranks == sorted(ranks, reverse=True)
-
-
-def test_scrap_tinggi_saja_tidak_menaikkan_prioritas():
-    assert recommend("LOW", "HIGH")["priority"] == "LOW"
-    assert recommend("LOW", "HIGH")["action"] == "MONITOR"
-
-
-def test_risiko_kerusakan_dan_scrap_sama_sama_tinggi_jadi_kritis():
-    decision = recommend("HIGH", "HIGH")
-    assert decision["priority"] == "CRITICAL"
-    assert decision["action"] == "INSPECT_AND_PREPARE_REPLACEMENT"
-
-
-def test_kandidat_penggantian_hanya_saat_dua_risiko_bertemu():
-    assert is_replacement_candidate("HIGH", "HIGH")
-    assert is_replacement_candidate("MEDIUM", "HIGH")
-    assert not is_replacement_candidate("LOW", "HIGH")
-    assert not is_replacement_candidate("HIGH", "MEDIUM")
-    assert not is_replacement_candidate("HIGH", None)
+    ranks = [
+        PRIORITY_ORDER[recommend(failure_level)["priority"]]
+        for failure_level in ("LOW", "MEDIUM", "HIGH")
+    ]
+    assert ranks == sorted(ranks, reverse=True)
 
 
 def _row(**overrides) -> pd.Series:
@@ -489,38 +455,18 @@ def test_jumlah_high_live_dan_expected_konsisten_secara_struktur():
 
 @needs_database
 @needs_models
-def test_scrap_monitoring_prediksi_dilabeli_jelas_bukan_tingkat_sungguhan():
-    result = monitoring_service.scrap_monitoring()
-    live = result["live"]
-    assert "predicted_scrap_probability_mean" in live
-    assert "predicted_scrap_probability_distribution" in live
-
-
-@needs_database
-@needs_models
 def test_endpoint_monitoring_metrics(client):
     response = client.get("/api/v1/monitoring/metrics")
     assert response.status_code == 200
     body = response.json()
-    assert "failure" in body and "scrap" in body
+    assert "failure" in body
 
 
 @needs_database
 @needs_models
 def test_endpoint_monitoring_terpisah_per_model(client):
     failure_only = client.get("/api/v1/monitoring/metrics/failure").json()
-    scrap_only = client.get("/api/v1/monitoring/metrics/scrap").json()
     assert "offline" in failure_only and "live" in failure_only
-    assert "offline" in scrap_only and "live" in scrap_only
-
-
-def test_survival_metadata_none_kalau_artifact_belum_ada(monkeypatch):
-    from partrisk.engines.survival import predict as predict_survival
-
-    monkeypatch.setattr(
-        predict_survival, "ARTIFACTS_DIR", Path("__jalur_survival_yang_tidak_pernah_ada__")
-    )
-    assert predictor.survival_metadata() is None
 
 
 def _terminal_raw(rows: list[dict]) -> pd.DataFrame:
@@ -537,8 +483,6 @@ def _scored_frame(rows: list[dict]) -> pd.DataFrame:
     base = {
         "failure_risk_level": "LOW", "tier_score": 0.1,
         f"failure_probability_{config.TARGET_HORIZON_DAYS}d": 0.1,
-        "median_days_to_failure": None,
-        "replacement_candidate": False,
     }
     return pd.DataFrame([{**base, **row} for row in rows])
 
@@ -605,13 +549,13 @@ def test_terminal_summary_mengagregasi_tanpa_memaksakan_part_tanpa_terminal():
             "item_id": "A", "terminal_id": "1", "terminal_label": "TRM-1",
             "terminal_model_name": "Model X", "location": "SITE A",
             "failure_risk_level": "HIGH", "tier_score": 0.9,
-            prob_column: 0.9, "median_days_to_failure": 10.0,
+            prob_column: 0.9,
         },
         {
             "item_id": "B", "terminal_id": "1", "terminal_label": "TRM-1",
             "terminal_model_name": "Model X", "location": "SITE A",
             "failure_risk_level": "LOW", "tier_score": 0.1,
-            prob_column: 0.1, "median_days_to_failure": 400.0,
+            prob_column: 0.1,
         },
         {"item_id": "C", "terminal_id": pd.NA},
     ])
@@ -621,7 +565,6 @@ def test_terminal_summary_mengagregasi_tanpa_memaksakan_part_tanpa_terminal():
     assert row["active_parts"] == 2
     assert row["high_risk_parts"] == 1
     assert row["top_risk_item_id"] == "A"
-    assert row["nearest_median_days_to_failure"] == 10.0
 
 
 def test_terminal_summary_kosong_kalau_tidak_ada_part_dengan_terminal():
@@ -837,7 +780,6 @@ PAGES = [
     DASHBOARD_DIR / "pages" / "1_Parts.py",
     DASHBOARD_DIR / "pages" / "2_Part_Detail.py",
     DASHBOARD_DIR / "pages" / "3_Inspeksi.py",
-    DASHBOARD_DIR / "pages" / "4_Perencanaan_Penggantian.py",
     DASHBOARD_DIR / "pages" / "5_Terminal.py",
     DASHBOARD_DIR / "pages" / "6_Sistem.py",
 ]
@@ -950,10 +892,10 @@ def test_filter_lokasi_terisi_dari_map_location_filter_dan_bertahan_setelah_reru
     assert location_box.value == available_location
     assert "map_location_filter" not in app.session_state
 
-    replacement_checkbox = next(
-        box for box in app.checkbox if box.label == "Hanya kandidat penggantian"
+    official_toggle = next(
+        box for box in app.toggle if box.label == "Antrian dengan risiko tinggi"
     )
-    app = replacement_checkbox.set_value(not replacement_checkbox.value).run()
+    app = official_toggle.set_value(not official_toggle.value).run()
 
     location_box = next(box for box in app.selectbox if box.label == "Lokasi")
     assert location_box.value == available_location, (

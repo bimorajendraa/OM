@@ -8,7 +8,6 @@ import statistics
 import time
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 import psutil
@@ -18,18 +17,11 @@ from sklearn.isotonic import IsotonicRegression
 from partrisk.core import config
 from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
-from partrisk.core import features_survival as features
 from partrisk.engines import predict
 from partrisk.serving import single as serving
 from partrisk.serving import batch as serving_batch
-from partrisk.engines.survival import curve as survival
 from partrisk.engines.failure import train as training_failure
 from partrisk.engines.failure import gate
-from partrisk.engines.failure import train_mtbf_candidate
-from partrisk.engines.scrap import train as training_scrap
-from partrisk.engines.survival import train as build_dataset
-from partrisk.engines.survival import train as operational_eval
-from partrisk.engines.survival import predict as predict_survival
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -90,7 +82,7 @@ def _predict_main(args: argparse.Namespace) -> int:
 
     columns = [
         "rank", "item_id", "item_type", "failure_risk_level",
-        "failure_probability_30d", "scrap_risk_level", "priority", "recommended_action",
+        "failure_probability_30d", "priority", "recommended_action",
     ]
     print(frame[columns].head(args.top).to_string(index=False))
 
@@ -143,7 +135,16 @@ def _split(combined: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return frame.reset_index(drop=True), snapshot.reset_index(drop=True)
 
 
-def compare(path_a: Path, path_b: Path, *, rtol: float = 1e-9) -> bool:
+def compare(path_a: Path, path_b: Path, *, rtol: float = 1e-9, columns: set[str] | None = None) -> bool:
+    """`columns=None` (default): kolom A dan B harus SAMA PERSIS (perilaku lama).
+
+    `columns={...}`: per tabel (frame/snapshot), dibandingkan hanya irisan
+    `columns` dengan kolom yang benar-benar ada di tabel itu di KEDUA file -
+    tabel yang tidak punya kolom relevan sama sekali dilewati (bukan gagal).
+    Dipakai untuk membuktikan angka Q2 tidak berubah lintas refactor yang
+    SENGAJA mengubah skema (mis. penghapusan Survival/Scrap), bukan untuk
+    pure-move.
+    """
     frame_a, snap_a = _split(pd.read_parquet(path_a))
     frame_b, snap_b = _split(pd.read_parquet(path_b))
 
@@ -151,7 +152,13 @@ def compare(path_a: Path, path_b: Path, *, rtol: float = 1e-9) -> bool:
     for name, a, b, key in (("frame", frame_a, frame_b, "item_id"), ("snapshot", snap_a, snap_b, "item_id")):
         print(f"\n--- {name}: {path_a.name} ({len(a):,} baris) vs {path_b.name} ({len(b):,} baris) ---")
         cols_a, cols_b = set(a.columns), set(b.columns)
-        if cols_a != cols_b:
+        if columns is not None:
+            relevant = columns & cols_a & cols_b
+            if not relevant:
+                print(f"  (tidak ada kolom diminta yang relevan di tabel {name}, dilewati)")
+                continue
+            cols_a = cols_b = relevant
+        elif cols_a != cols_b:
             print(f"  KOLOM BEDA: hanya di A={cols_a-cols_b}  hanya di B={cols_b-cols_a}")
             ok = False
             continue
@@ -599,121 +606,6 @@ def _rolling_lifecycle_backtest_main() -> int:
     return 0
 
 
-def load_artifacts() -> dict:
-    directory = predict_survival.ARTIFACTS_DIR
-    models = joblib.load(directory / "models.joblib")
-    for model in models.values():
-        if hasattr(model, "n_jobs"):
-            model.n_jobs = 1
-    encoder = joblib.load(directory / "encoder.joblib")
-    y_train = joblib.load(directory / "y_train.joblib")
-    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-    return {"models": models, "encoder": encoder, "y_train": y_train, "metadata": metadata}
-
-
-def _native_by_split(models, encoder, y_train, dataset, feature_frame, mask_by_split) -> dict:
-    results: dict = {}
-    for split_name, mask in mask_by_split.items():
-        y_eval = survival.make_survival_target(dataset, mask)
-        x_eval = features.encode(feature_frame.loc[mask], encoder)
-        results[split_name] = {
-            name: survival.native_metrics(
-                model, y_train, x_eval, y_eval, risk_sign=survival.MODEL_REGISTRY.get(name, {}).get("risk_sign", 1)
-            )
-            for name, model in models.items()
-        }
-    return results
-
-
-def _evaluate_survival_main() -> int:
-    print("[1/4] Memuat artifacts hasil training...")
-    artifacts = load_artifacts()
-    models, encoder, y_train = artifacts["models"], artifacts["encoder"], artifacts["y_train"]
-
-    print("[2/4] Menyusun dataset (cache kalau SURVIVAL_BUILD_CACHE=1)...")
-    built = build_dataset.build()
-    dataset, feature_frame = built["dataset"], built["features"]
-    masks = {name: (dataset["split"] == name).to_numpy() for name in ("VALIDATION", "TEST")}
-
-    print("[3/4] Lapis 1 (full landmark) & Lapis 1b (t0-only, adil vs model statis)...")
-    native_full = _native_by_split(models, encoder, y_train, dataset, feature_frame, masks)
-    for split_name, per_model in native_full.items():
-        for model_name, m in per_model.items():
-            print(f"      [full]    {split_name:10s} {model_name:24s} C-index={m['c_index']:.4f}")
-
-    t0_mask_global = (dataset["landmark_source"] == "INSTALL").to_numpy()
-    t0_masks = {name: masks[name] & t0_mask_global for name in masks}
-    native_t0 = _native_by_split(models, encoder, y_train, dataset, feature_frame, t0_masks)
-    for split_name, per_model in native_t0.items():
-        for model_name, m in per_model.items():
-            print(f"      [t0-only] {split_name:10s} {model_name:24s} C-index={m['c_index']:.4f}")
-
-    print("[4/4] Lapis 2: perbandingan adil dengan classification model production (fitur t0-only)...")
-    test_rows, window_days = operational_eval.load_classification_test_rows()
-    t0_feature_frame = feature_frame.loc[t0_mask_global].copy()
-    t0_feature_frame.index = dataset.loc[t0_mask_global, "installation_cycle_id"].to_numpy()
-    eb_numeric_columns = features.NUMERIC_FEATURES + features.FLEET_FEATURES
-    operational = {
-        name: operational_eval.score_operational(
-            model, t0_feature_frame, encoder, test_rows, window_days, numeric_columns=eb_numeric_columns
-        )
-        for name, model in models.items()
-    }
-    for name, m in operational.items():
-        if m is None:
-            print(f"      {name:24s} (tidak ada baris TEST classification yang cocok)")
-            continue
-        print(
-            f"      {name:24s} PR-AUC={m['pr_auc']:.4f}  ROC-AUC={m['roc_auc']:.4f}  "
-            f"Recall@cap={m['recall_at_capacity']:.4f}  Precision@cap={m['precision_at_capacity']:.4f}"
-        )
-
-    report = _format_report(native_full, native_t0, operational, dataset, window_days)
-    print("\n" + report)
-    return 0
-
-
-def _format_report(native_full, native_t0, operational, dataset, window_days) -> str:
-    lines = ["# Laporan evaluasi event-based survival (Tahap 6-9)", ""]
-    lines.append(
-        "Tiga lapis - lihat docstring evaluate.py untuk definisi lengkap tiap lapis dan kenapa "
-        "dipisah. **Lapis 1b (t0-only) adalah angka yang SEBANDING dengan C-index model statis** "
-        "(docs/EXPERIMENTS.md E-02) - Lapis 1 (full landmark) TIDAK sebanding "
-        "langsung (repeated measures per lifecycle)."
-    )
-    lines.append("")
-    lines.append("## Lapis 1 - native, SEMUA baris landmark (bukan perbandingan apples-to-apples)")
-    for split_name, per_model in native_full.items():
-        lines.append(f"\n### {split_name}")
-        for model_name, m in per_model.items():
-            lines.append(
-                f"- **{model_name}**: rows={m['rows']:,} events={m['events']:,} "
-                f"C-index(Harrell)={m['c_index']:.4f} IBS={m['integrated_brier_score']}"
-            )
-
-    lines.append("\n## Lapis 1b - native, T0-ONLY (satu baris/lifecycle, SEBANDING dengan model statis)")
-    for split_name, per_model in native_t0.items():
-        lines.append(f"\n### {split_name}")
-        for model_name, m in per_model.items():
-            lines.append(
-                f"- **{model_name}**: rows={m['rows']:,} events={m['events']:,} "
-                f"C-index(Harrell)={m['c_index']:.4f} IBS={m['integrated_brier_score']}"
-            )
-
-    lines.append("\n## Lapis 2 - perbandingan adil vs classification model (fitur t0-only, populasi TEST classification)")
-    lines.append(f"\nWindow {window_days:.0f} hari, kapasitas {config.FAILURE_CAPACITY_PER_MONTH}/bulan.")
-    for name, m in operational.items():
-        if m is None:
-            lines.append(f"- {name}: tidak ada baris TEST classification yang cocok")
-            continue
-        lines.append(
-            f"- **{name}**: PR-AUC={m['pr_auc']:.4f} ROC-AUC={m['roc_auc']:.4f} "
-            f"Recall@cap={m['recall_at_capacity']:.4f} Precision@cap={m['precision_at_capacity']:.4f} "
-            f"Brier={m['brier_calibrated']:.4f}"
-        )
-    return "\n".join(lines)
-
-
 _BOOTSTRAP_N = 1000
 _BOOTSTRAP_SEED = 42
 
@@ -789,100 +681,11 @@ def _bootstrap_ci_failure() -> dict:
     return ci
 
 
-def _bootstrap_ci_scrap() -> dict:
-    print("[scrap] Menyusun TEST dan skor v1 (dukungan beku)...")
-    dataset, _features, _target, _known_types = training_scrap.build_dataset()
-    onset = dataset["failure_onset_on"]
-    is_test = (onset >= pd.Timestamp(config.SCRAP_TEST_START)).to_numpy()
-
-    current_version = training_failure.current_version(config.SCRAP_MODEL_DIR)
-    if current_version is None:
-        raise SystemExit("Tidak ada model scrap CURRENT.")
-    scored = training_scrap.evaluate_incumbent(current_version, dataset, is_test)
-    raw, calibrated, target = scored["raw"], scored["calibrated"], scored["target"]
-
-    test_onset = onset[is_test]
-    window_days = float((test_onset.max() - test_onset.min()).days) if is_test.sum() else 0.0
-
-    print(
-        f"      TEST: {int(is_test.sum()):,} baris, {int(target.sum()):,} kejadian rusak total - "
-        f"bootstrap {_BOOTSTRAP_N}x... (base rate kecil - CI diperkirakan LEBAR, itu intinya)"
-    )
-    ci = _bootstrap_classification_ci(
-        raw, calibrated, target, window_days, config.SCRAP_CAPACITY_PER_MONTH, days_per_month=30.44,
-    )
-    for key in ("roc_auc", "pr_auc", "precision_at_capacity", "recall_at_capacity"):
-        print(f"      {key:<24} CI95=[{ci[key][0]}, {ci[key][1]}]")
-
-    path = config.SCRAP_MODEL_DIR / current_version / "metadata.json"
-
-    def _apply(doc: dict) -> None:
-        doc["evaluation_metrics"]["bootstrap_ci_95"] = ci
-
-    _update_metadata_json(path, _apply)
-    print(f"      Disimpan ke {path}")
-    return ci
-
-
-def _bootstrap_ci_survival() -> dict:
-    print("[survival] Memuat artifacts RSF/Cox dan bootstrap C-index (VALIDATION + TEST)...")
-    artifacts = load_artifacts()
-    models, encoder, y_train = artifacts["models"], artifacts["encoder"], artifacts["y_train"]
-
-    built = build_dataset.build()
-    dataset, feature_frame = built["dataset"], built["features"]
-
-    results: dict[str, dict] = {}
-    for model_name, model in models.items():
-        risk_sign = survival.MODEL_REGISTRY.get(model_name, {}).get("risk_sign", 1)
-        results[model_name] = {}
-        for split_name in ("VALIDATION", "TEST"):
-            mask = (dataset["split"] == split_name).to_numpy()
-            y_eval = survival.make_survival_target(dataset, mask)
-            x_eval = features.encode(feature_frame.loc[mask], encoder)
-            ci = survival.bootstrap_c_index(
-                model, y_train, x_eval, y_eval,
-                risk_sign=risk_sign, n_boot=_BOOTSTRAP_N, seed=_BOOTSTRAP_SEED,
-            )
-            results[model_name][split_name] = ci
-            print(
-                f"      {model_name:<24} {split_name:<10} C-index={ci['point_estimate']:.4f} "
-                f"CI95=[{ci['ci_lower_2_5']:.4f}, {ci['ci_upper_97_5']:.4f}] "
-                f"(n_boot_valid={ci['n_boot_valid']})"
-            )
-
-    path = predict_survival.ARTIFACTS_DIR / "metadata.json"
-
-    def _apply(doc: dict) -> None:
-        block = doc.setdefault("evaluation_metrics_full_landmark_rows", {})
-        for model_name, per_split in results.items():
-            for split_name, ci in per_split.items():
-                key = split_name.lower()
-                if model_name in block and key in block[model_name]:
-                    block[model_name][key]["bootstrap_ci_95"] = {
-                        "c_index_point_estimate": ci["point_estimate"],
-                        "ci_lower_2_5": ci["ci_lower_2_5"],
-                        "ci_upper_97_5": ci["ci_upper_97_5"],
-                        "std": ci["std"],
-                        "n_boot": _BOOTSTRAP_N,
-                        "n_boot_valid": ci["n_boot_valid"],
-                    }
-
-    _update_metadata_json(path, _apply)
-    print(f"      Disimpan ke {path}")
-    return results
-
-
 def _bootstrap_ci_main() -> int:
-    """FASE 7 P0-2: CI bootstrap 1000-resample untuk metrik headline ketiga
-    model - WAJIB untuk scrap (21 positif di TEST, CI diperkirakan lebar).
-    Metadata.json masing-masing ditulis ulang dengan field bootstrap_ci_95
+    """FASE 7 P0-2: CI bootstrap 1000-resample untuk metrik headline model
+    kerusakan. Metadata.json ditulis ulang dengan field bootstrap_ci_95
     baru (field yang dipakai scoring TIDAK disentuh)."""
     _bootstrap_ci_failure()
-    print()
-    _bootstrap_ci_scrap()
-    print()
-    _bootstrap_ci_survival()
     return 0
 
 
@@ -1018,70 +821,6 @@ def _attach_gate_main() -> int:
     return 0
 
 
-def _audit_scrap_outcomes_main() -> int:
-    """Poin 7 dari tinjauan kritis: apakah baris `outcome UNKNOWN` (dibuang dari
-    training scrap) tersebar acak, atau terkonsentrasi di segmen tertentu -
-    yang berarti model belajar P(scrap | failure DAN outcome tercatat), bukan
-    P(scrap | failure)."""
-    print("[1/3] Membaca kerusakan, event, dan siklus dari database...")
-    episodes = data_reader.get_failure_episodes()
-    events = data_reader.get_events()
-    cycles = data_reader.get_cycles()
-    data_end = pd.Timestamp(cycles["dataset_max_event_on"].max())
-
-    print("[2/3] Menentukan nasib tiap kerusakan (fungsi sama dengan training scrap)...")
-    labeled = feature_builder.resolve_outcomes(episodes, events, cycles, data_end)
-    client_lookup = cycles[["item_identifier_clean", "installed_on", "installed_client_clean"]].assign(
-        installed_on=lambda f: pd.to_datetime(f["installed_on"])
-    )
-    labeled = labeled.merge(client_lookup, on=["item_identifier_clean", "installed_on"], how="left")
-
-    era = labeled["failure_onset_on"] >= pd.Timestamp(config.SCRAP_ERA_START)
-    cohort = era & labeled["is_initial_model_cohort"].fillna(False)
-    past_embargo = labeled["failure_onset_on"] <= (
-        pd.Timestamp(data_end) - pd.Timedelta(days=config.SCRAP_EMBARGO_DAYS)
-    )
-    eligible = cohort & past_embargo
-    unknown = eligible & ~labeled["is_labeled"]
-
-    n_eligible = int(eligible.sum())
-    n_unknown = int(unknown.sum())
-    overall_rate = n_unknown / n_eligible if n_eligible else 0.0
-    print(
-        f"      Eligible (sudah lewat embargo {config.SCRAP_EMBARGO_DAYS} hari): {n_eligible:,}\n"
-        f"      Fate UNKNOWN (dibuang dari training): {n_unknown:,} ({overall_rate:.1%} dari eligible)"
-    )
-
-    print("\n[3/3] Proporsi UNKNOWN per segmen (dibanding rata-rata keseluruhan):")
-    segments = {
-        "tahun": labeled["failure_onset_on"].dt.year,
-        "item_type": labeled["item_type_clean"],
-        "part_model": labeled["item_model_code_clean"],
-        "client": labeled["installed_client_clean"],
-    }
-    header = f"{'segmen':<12}{'nilai':<24}{'n_eligible':>11}{'n_unknown':>11}{'%_unknown':>11}"
-    for segment_name, keys in segments.items():
-        print(f"\n  -- {segment_name} --")
-        print(f"  {header}")
-        table = pd.DataFrame({
-            "key": keys[eligible].fillna(config.UNKNOWN_LABEL).astype(str),
-            "is_unknown": unknown[eligible].to_numpy(),
-        })
-        grouped = table.groupby("key")["is_unknown"].agg(["sum", "count"]).sort_values("count", ascending=False)
-        for key, row in grouped.iterrows():
-            n, unk = int(row["count"]), int(row["sum"])
-            rate = unk / n if n else 0.0
-            flag = " <-- 1.5x rata-rata" if n >= 20 and overall_rate > 0 and rate > 1.5 * overall_rate else ""
-            print(f"  {segment_name:<12}{str(key):<24}{n:>11}{unk:>11}{rate:>10.1%}{flag}")
-
-    print(
-        f"\n[Ringkasan] rata-rata UNKNOWN keseluruhan = {overall_rate:.1%}. Segmen bertanda "
-        "'<-- 1.5x rata-rata' (n>=20) berpotensi bias seleksi - lihat docs/DECISIONS.md "
-        "poin 7 tinjauan kritis kalau ada yang menonjol."
-    )
-    return 0
-
-
 _LIFECYCLE_SWEEP_TARGETS = (0.30, 0.40, 0.50, 0.60, 0.70, 0.85)
 
 
@@ -1167,7 +906,6 @@ def main() -> int:
         "baseline-comparison",
         help="Bandingkan precision@kapasitas model vs kebijakan urutan kerja tanpa model.",
     )
-    sub.add_parser("evaluate-survival", help="Evaluasi model survival event-based.")
     sub.add_parser(
         "rolling-backtest",
         help="Backtest temporal bergulir v3 vs v4 (precision@kapasitas, mean +/- sd).",
@@ -1177,12 +915,8 @@ def main() -> int:
         help="Fase 8: stabilitas model failure production antar-periode, evaluasi lifecycle-based (E-49). Wajib sebelum klaim kandidat baru.",
     )
     sub.add_parser(
-        "train-mtbf-candidate",
-        help="Fase 8 E-66: latih & pantau kandidat model +MTBF (window 2025+ terbatas). TIDAK memengaruhi model production - jalankan berkala untuk cek apakah sudah melampaui v4.",
-    )
-    sub.add_parser(
         "bootstrap-ci",
-        help="CI bootstrap 1000-resample untuk metrik headline (failure/scrap/survival).",
+        help="CI bootstrap 1000-resample untuk metrik headline model failure.",
     )
     sub.add_parser(
         "precision-gate-experiment",
@@ -1195,10 +929,6 @@ def main() -> int:
     sub.add_parser(
         "lifecycle-gate-experiment",
         help="Fase 8 Langkah A: sweep gerbang presisi di tingkat lifecycle (first-alert), bukan per-baris.",
-    )
-    sub.add_parser(
-        "audit-scrap-outcomes",
-        help="Poin 7 tinjauan kritis: proporsi outcome UNKNOWN scrap per tahun/item_type/part_model/client.",
     )
 
     args = parser.parse_args()
@@ -1213,14 +943,10 @@ def main() -> int:
         return _baseline_performance_main()
     if args.command == "baseline-comparison":
         return _baseline_comparison_main()
-    if args.command == "evaluate-survival":
-        return _evaluate_survival_main()
     if args.command == "rolling-backtest":
         return _rolling_backtest_main()
     if args.command == "rolling-lifecycle-backtest":
         return _rolling_lifecycle_backtest_main()
-    if args.command == "train-mtbf-candidate":
-        return train_mtbf_candidate.main()
     if args.command == "bootstrap-ci":
         return _bootstrap_ci_main()
     if args.command == "precision-gate-experiment":
@@ -1229,8 +955,6 @@ def main() -> int:
         return _attach_gate_main()
     if args.command == "lifecycle-gate-experiment":
         return _lifecycle_gate_experiment_main()
-    if args.command == "audit-scrap-outcomes":
-        return _audit_scrap_outcomes_main()
     return 1
 
 

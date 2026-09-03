@@ -122,19 +122,117 @@ def attach_history(observations: pd.DataFrame, events: pd.DataFrame) -> pd.DataF
     return observations
 
 
+def cumulative_cycle_age(cycles: pd.DataFrame) -> pd.DataFrame:
+    frame = cycles.reset_index(drop=True).copy()
+    frame["_sequence"] = frame["installation_cycle_id"].str.rsplit(":", n=1).str[-1].astype(int)
+    frame = frame.sort_values(["item_identifier_clean", "_sequence"], kind="stable")
+
+    duration_days = (frame["cycle_end_on"] - frame["installed_on"]) / np.timedelta64(1, "D")
+    frame["_duration"] = duration_days.clip(lower=0.0)
+
+    grouped = frame.groupby("item_identifier_clean", sort=False)["_duration"]
+
+    cumulative = grouped.cumsum()
+    frame["cumulative_prior_cycle_days"] = (
+        cumulative.groupby(frame["item_identifier_clean"], sort=False).shift(1).fillna(0.0)
+    )
+    frame["previous_cycle_count"] = frame.groupby("item_identifier_clean", sort=False).cumcount()
+
+    return frame[["installation_cycle_id", "cumulative_prior_cycle_days", "previous_cycle_count"]].sort_index()
+
+
+def corrective_degradation_trend(landmarks: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    landmarks = landmarks.reset_index(drop=True)
+    n = len(landmarks)
+    mean_gap = np.zeros(n)
+    last_gap = np.zeros(n)
+    trend_ratio = np.zeros(n)
+    has_trend = np.zeros(n, dtype=bool)
+
+    failures = events.loc[events["is_failure_onset"].fillna(False)].sort_values(
+        ["item_identifier_clean", "created_on"], kind="stable"
+    )
+    failure_times_by_item = {
+        item: sub["created_on"].to_numpy("datetime64[ns]")
+        for item, sub in failures.groupby("item_identifier_clean", sort=False)
+    }
+
+    at = landmarks["observation_on"].to_numpy("datetime64[ns]")
+    day = np.timedelta64(1, "D")
+
+    rows_by_item = landmarks.groupby("item_identifier_clean", sort=False).indices
+    for item, rows in rows_by_item.items():
+        times = failure_times_by_item.get(item)
+        if times is None or len(times) < 3:
+            continue
+        gaps = (times[1:] - times[:-1]) / day
+        cum_mean = np.cumsum(gaps) / np.arange(1, len(gaps) + 1)
+
+        rows_arr = rows.to_numpy() if hasattr(rows, "to_numpy") else np.asarray(rows)
+        pos = np.searchsorted(times, at[rows_arr], side="left")
+        eligible = pos >= 3
+        idx = np.clip(pos - 2, 0, len(gaps) - 1)
+        mean_gap[rows_arr[eligible]] = cum_mean[idx[eligible]]
+        last_gap[rows_arr[eligible]] = gaps[idx[eligible]]
+        has_trend[rows_arr[eligible]] = True
+
+    valid_mean = has_trend & (mean_gap > 0)
+    trend_ratio[valid_mean] = last_gap[valid_mean] / mean_gap[valid_mean]
+
+    out = pd.DataFrame(index=landmarks.index)
+    out["has_failure_interval_trend"] = has_trend
+    out["log_failure_interval_mean_days"] = np.log1p(np.clip(mean_gap, 0, None))
+    out["log_failure_interval_last_days"] = np.log1p(np.clip(last_gap, 0, None))
+    out["failure_interval_trend_ratio"] = np.where(valid_mean, np.clip(trend_ratio, 0, 10), 1.0)
+    return out
+
+
+def windowed_corrective_extra(landmarks: pd.DataFrame, events: pd.DataFrame, windows=(60, 90)) -> pd.DataFrame:
+    landmarks = landmarks.reset_index(drop=True)
+    n = len(landmarks)
+    out = pd.DataFrame(index=landmarks.index)
+    for w in windows:
+        out[f"prior_corrective_{w}d"] = np.zeros(n, dtype="int64")
+
+    corrective = events.loc[events["wo_type_clean"].eq("CORRECTIVE")].sort_values(
+        ["item_identifier_clean", "created_on"], kind="stable"
+    )
+    times_by_item = {
+        item: sub["created_on"].to_numpy("datetime64[ns]")
+        for item, sub in corrective.groupby("item_identifier_clean", sort=False)
+    }
+
+    at = landmarks["observation_on"].to_numpy("datetime64[ns]")
+    rows_by_item = landmarks.groupby("item_identifier_clean", sort=False).indices
+
+    for item, rows in rows_by_item.items():
+        times = times_by_item.get(item)
+        if times is None or not len(times):
+            continue
+        rows_arr = rows.to_numpy() if hasattr(rows, "to_numpy") else np.asarray(rows)
+        query = at[rows_arr]
+        seen = np.searchsorted(times, query, side="right")
+        for w in windows:
+            window_start = query - np.timedelta64(w, "D")
+            seen_window = np.searchsorted(times, window_start, side="right")
+            out.loc[rows_arr, f"prior_corrective_{w}d"] = seen - seen_window
+
+    for w in windows:
+        out[f"log_prior_corrective_{w}d"] = np.log1p(out[f"prior_corrective_{w}d"])
+    return out
+
+
 def attach_degradation_history(
     observations: pd.DataFrame, cycles: pd.DataFrame, events: pd.DataFrame
 ) -> pd.DataFrame:
-    from partrisk.core import features_survival
-
     observations = observations.reset_index(drop=True)
 
-    cum = features_survival.cumulative_cycle_age(cycles)
+    cum = cumulative_cycle_age(cycles)
     cum_lookup = cum.set_index("installation_cycle_id")
     matched = observations["installation_cycle_id"].map(cum_lookup["cumulative_prior_cycle_days"])
     count_matched = observations["installation_cycle_id"].map(cum_lookup["previous_cycle_count"])
-    trend = features_survival.corrective_degradation_trend(observations, events)
-    windowed = features_survival.windowed_corrective_extra(observations, events)
+    trend = corrective_degradation_trend(observations, events)
+    windowed = windowed_corrective_extra(observations, events)
 
     observations["log_cumulative_prior_cycle_days"] = np.log1p(
         pd.to_numeric(matched, errors="coerce").fillna(0.0).clip(lower=0.0)
@@ -271,6 +369,24 @@ def local_density(
     return recent, fleet
 
 
+def attach_install_context(observations: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    installed_events = (
+        events.loc[
+            events["status_clean"].eq("INSTALLED"),
+            ["item_identifier_clean", "created_on", "item_type_clean"],
+        ]
+        .drop_duplicates(subset=["item_identifier_clean", "created_on"], keep="first")
+    )
+    merged = observations.merge(
+        installed_events,
+        left_on=["item_identifier_clean", "installed_on"],
+        right_on=["item_identifier_clean", "created_on"],
+        how="left",
+    )
+    merged["item_type_at_install"] = merged["item_type_clean"].fillna(config.UNKNOWN_LABEL).astype(str)
+    return merged.drop(columns=["created_on", "item_type_clean"])
+
+
 def _item_type_density_columns(frame: pd.DataFrame, cycles_aug: pd.DataFrame, episodes_aug: pd.DataFrame) -> pd.DataFrame:
     for window in ITEM_TYPE_DENSITY_WINDOWS:
         recent, fleet = local_density(frame, cycles_aug, episodes_aug, "item_type_at_install", window)
@@ -282,10 +398,8 @@ def _item_type_density_columns(frame: pd.DataFrame, cycles_aug: pd.DataFrame, ep
 def attach_item_type_density(
     observations: pd.DataFrame, events: pd.DataFrame, cycles: pd.DataFrame, episodes: pd.DataFrame,
 ) -> pd.DataFrame:
-    from partrisk.core import features_survival
-
-    observations = features_survival.attach_install_context(observations, events)
-    cycles_aug = features_survival.attach_install_context(cycles, events)
+    observations = attach_install_context(observations, events)
+    cycles_aug = attach_install_context(cycles, events)
     episodes_aug = episodes.rename(columns={"item_type_clean": "item_type_at_install"})
     return _item_type_density_columns(observations, cycles_aug, episodes_aug)
 
@@ -293,9 +407,7 @@ def attach_item_type_density(
 def item_type_density_snapshot(
     cycles: pd.DataFrame, events: pd.DataFrame, episodes: pd.DataFrame, at: pd.Timestamp,
 ) -> pd.DataFrame:
-    from partrisk.core import features_survival
-
-    cycles_aug = features_survival.attach_install_context(cycles, events)
+    cycles_aug = attach_install_context(cycles, events)
     episodes_aug = episodes.rename(columns={"item_type_clean": "item_type_at_install"})
     types = pd.Series(cycles_aug["item_type_at_install"].dropna().unique(), name="item_type_at_install")
     frame = pd.DataFrame({"item_type_at_install": types.to_numpy()})
@@ -308,9 +420,7 @@ def item_type_density_snapshot(
 def attach_item_type_density_snapshot(
     observations: pd.DataFrame, events: pd.DataFrame, snapshot: pd.DataFrame,
 ) -> pd.DataFrame:
-    from partrisk.core import features_survival
-
-    observations = features_survival.attach_install_context(observations, events).reset_index(drop=True)
+    observations = attach_install_context(observations, events).reset_index(drop=True)
     lookup = snapshot.set_index("item_type_at_install")
     key = observations["item_type_at_install"]
     density_columns = [c for c in snapshot.columns if c != "item_type_at_install"]
@@ -489,165 +599,3 @@ def project_features(raw: pd.DataFrame, support: pd.Series, steps_ahead: int) ->
     return build_features(shifted, support)
 
 
-_TERMINAL_STATUS = set(config.FAILURE_OUTCOME_STATUS) | {config.REPAIR_COMPLETED_STATUS}
-
-
-def _first_after(times: np.ndarray, journeys: np.ndarray, moment, journey_id: int) -> int:
-    low = int(np.searchsorted(times, moment, side="left"))
-    high = int(np.searchsorted(times, moment, side="right"))
-    within = low + int(np.searchsorted(journeys[low:high], journey_id, side="right"))
-    return within if within < high else high
-
-
-def resolve_outcomes(
-    episodes: pd.DataFrame, events: pd.DataFrame, cycles: pd.DataFrame, data_end: pd.Timestamp
-) -> pd.DataFrame:
-    episodes = episodes.reset_index(drop=True).copy()
-    episodes["failure_onset_on"] = pd.to_datetime(episodes["failure_onset_on"])
-
-    events = events.sort_values(
-        ["item_identifier_clean", "created_on", "journey_id"], kind="stable"
-    ).reset_index(drop=True)
-    event_times = events["created_on"].to_numpy("datetime64[ns]")
-    event_journeys = events["journey_id"].to_numpy("int64")
-    status = events["status_clean"].fillna("").to_numpy(dtype=object)
-    is_failure = events["is_failure_onset"].fillna(False).to_numpy(dtype=bool)
-    is_repaired = status == config.REPAIR_COMPLETED_STATUS
-    is_installed = status == "INSTALLED"
-    is_terminal = np.array([s in _TERMINAL_STATUS for s in status], dtype=bool)
-    rows_by_item = events.groupby("item_identifier_clean", sort=False).indices
-
-    total = len(episodes)
-    outcome = np.full(total, None, dtype=object)
-    reinstalled = np.zeros(total, dtype=bool)
-    prior_repaired = np.zeros(total, dtype="int64")
-    prior_failures = np.zeros(total, dtype="int64")
-    first_seen = np.full(total, np.datetime64("NaT"), dtype="datetime64[ns]")
-
-    onsets = episodes["failure_onset_on"].to_numpy("datetime64[ns]")
-    onset_journeys = episodes["onset_journey_id"].to_numpy("int64")
-
-    for position, item in enumerate(episodes["item_identifier_clean"]):
-        slot = rows_by_item.get(item)
-        if slot is None:
-            continue
-        times, journeys = event_times[slot], event_journeys[slot]
-        moment, journey_id = onsets[position], onset_journeys[position]
-
-        seen = _first_after(times, journeys, moment, journey_id)
-        prior_repaired[position] = int(is_repaired[slot][:seen].sum())
-        prior_failures[position] = int(is_failure[slot][:seen].sum())
-        first_seen[position] = times[0]
-
-        after_installed = np.flatnonzero(is_installed[slot][seen:])
-        after_failure = np.flatnonzero(is_failure[slot][seen:])
-        if after_installed.size:
-            reinstalled[position] = True
-
-        limits = [times[seen + a[0]] for a in (after_installed, after_failure) if a.size]
-        boundary = min(limits) if limits else None
-
-        start = int(np.searchsorted(times, moment, side="left"))
-        candidates = np.flatnonzero(is_terminal[slot][start:])
-        for offset in candidates:
-            index = start + offset
-            if boundary is not None and times[index] > boundary:
-                break
-            outcome[position] = status[slot][index]
-            break
-
-    episodes["outcome"] = outcome
-    episodes["was_reinstalled"] = reinstalled
-    episodes["prior_repaired_count"] = prior_repaired
-    episodes["prior_failure_count"] = prior_failures
-    episodes["age_total_days"] = (onsets - first_seen) / _DAY
-
-    installs = (
-        cycles[["item_identifier_clean", "installed_on"]]
-        .assign(installed_on=lambda f: pd.to_datetime(f["installed_on"]))
-        .sort_values("installed_on")
-    )
-    episodes = pd.merge_asof(
-        episodes.sort_values("failure_onset_on"),
-        installs,
-        left_on="failure_onset_on",
-        right_on="installed_on",
-        by="item_identifier_clean",
-        direction="backward",
-    ).reset_index(drop=True)
-    episodes["cycle_age_days"] = (
-        episodes["failure_onset_on"] - episodes["installed_on"]
-    ).dt.total_seconds() / 86400.0
-
-    is_scrap = episodes["outcome"].isin(config.SCRAP_STATUS)
-    survived = episodes["outcome"].eq(config.REPAIR_COMPLETED_STATUS) | episodes["was_reinstalled"]
-    episodes["is_scrap"] = is_scrap.astype(int)
-    past_embargo = episodes["failure_onset_on"] <= (
-        pd.Timestamp(data_end) - pd.Timedelta(days=config.SCRAP_EMBARGO_DAYS)
-    )
-    episodes["is_labeled"] = (is_scrap | survived) & past_embargo
-    return episodes
-
-
-def current_state(
-    events: pd.DataFrame, cycles: pd.DataFrame, data_end: pd.Timestamp
-) -> pd.DataFrame:
-    if events.empty:
-        return pd.DataFrame()
-
-    moment = pd.Timestamp(data_end)
-    times = pd.to_datetime(events["created_on"])
-    seen = times <= moment
-    if not seen.any():
-        return pd.DataFrame()
-
-    status = events["status_clean"].fillna("")
-    item_type = events.loc[seen, "item_type_clean"].dropna()
-    installed = pd.to_datetime(cycles["installed_on"]) if len(cycles) else pd.Series(dtype="datetime64[ns]")
-    started = installed[installed <= moment]
-
-    return pd.DataFrame([{
-        "item_identifier_clean": events["item_identifier_clean"].iloc[0],
-        "failure_onset_on": moment,
-        "item_type_clean": item_type.iloc[-1] if len(item_type) else None,
-        "age_total_days": (moment - times[seen].min()).total_seconds() / 86400.0,
-        "cycle_age_days": (
-            (moment - started.max()).total_seconds() / 86400.0 if len(started) else np.nan
-        ),
-        "prior_repaired_count": int((seen & status.eq(config.REPAIR_COMPLETED_STATUS)).sum()),
-        "prior_failure_count": int(
-            (seen & events["is_failure_onset"].fillna(False)).sum()
-        ),
-    }])
-
-
-def known_item_types(labeled: pd.DataFrame) -> list[str]:
-    counts = labeled["item_type_clean"].value_counts()
-    return sorted(counts[counts >= config.SCRAP_MIN_TYPE_SUPPORT].index)
-
-
-def build_scrap_features(episodes: pd.DataFrame, known_types: list[str]) -> pd.DataFrame:
-    repaired = pd.to_numeric(episodes["prior_repaired_count"], errors="coerce").fillna(0)
-    failures = pd.to_numeric(episodes["prior_failure_count"], errors="coerce").fillna(0)
-
-    features = pd.DataFrame(index=episodes.index)
-    features["item_type_category"] = (
-        episodes["item_type_clean"]
-        .where(episodes["item_type_clean"].isin(known_types), "LOW_SUPPORT")
-        .fillna(config.UNKNOWN_LABEL)
-        .astype(str)
-    )
-    features["log_age_total"] = _log1p(episodes["age_total_days"])
-    features["log_cycle_age"] = _log1p(episodes["cycle_age_days"])
-    features["log_prior_repaired_count"] = np.log1p(repaired)
-    features["has_prior_repair"] = (repaired > 0).astype(float)
-    features["log_prior_failure_count"] = np.log1p(failures)
-    features["is_first_failure_ever"] = (failures <= 1).astype(float)
-
-    features[config.SCRAP_CATEGORICAL_FEATURES] = features[
-        config.SCRAP_CATEGORICAL_FEATURES
-    ].astype(str)
-    features[config.SCRAP_NUMERIC_FEATURES] = features[
-        config.SCRAP_NUMERIC_FEATURES
-    ].astype(float)
-    return features[config.SCRAP_FEATURE_COLUMNS]

@@ -824,3 +824,74 @@ Tidak ada artifact model production yang dilatih, dipromosikan, atau
 diubah oleh keputusan korektnes ini.
 
 ---
+
+## 21 · Survival (Q1) dan Scrap (Q3) DIHAPUS dari scope production - SUPERSEDES §1
+
+**Status**: berlaku, 2026-09-03. **MENGGANTIKAN §1** ("Survival event-based
+TIDAK cutover CatBoost") untuk keputusan scope - §1 sebelumnya mempertahankan
+Survival sebagai model advisory permanen; keputusan itu sekarang dibalik
+sepenuhnya atas instruksi eksplisit user (bukan temuan teknis baru) untuk
+menyederhanakan sistem menjadi murni failure-prediction, terintegrasi dengan
+aplikasi eksternal untuk keputusan lifecycle/intervention/alert. §1
+DIPERTAHANKAN APA ADANYA sesuai konvensi append-only dokumen ini (riwayat
+kenapa Survival awalnya TIDAK menggantikan CatBoost tetap valid secara
+historis), tapi implikasinya ("Survival masuk mode aditif...") tidak lagi
+berlaku - Survival sudah tidak ada di kode sama sekali.
+
+**Yang dihapus** (Milestone 1 dari refactor Terminal->Part->Item):
+- `src/partrisk/engines/survival/` (train.py, predict.py, curve.py) dan
+  `src/partrisk/core/features_survival.py` - model RSF/Cox Q1 beserta
+  seluruh feature builder landmark-nya.
+- `src/partrisk/engines/scrap/` - model LogReg+RF Q3.
+- `src/partrisk/engines/failure/train_mtbf_candidate.py` dan
+  `models/failure_mtbf_2025plus/` - kandidat Q2 eksperimental (E-66/E-68)
+  yang belum pernah dipromosikan ke `CURRENT`; dihapus bersamaan karena
+  tooling yang memproduksinya (`train-mtbf-candidate` CLI) tidak lagi punya
+  tempat setelah cleanup, bukan karena kandidatnya sendiri gagal.
+- `models/survival/`, `models/scrap/` - seluruh artifact versi.
+- Field API: `scrap_probability`, `scrap_risk_level`, `scrap_risk_basis`,
+  `death_probability_30d`, `median_days_to_failure`,
+  `days_until_survival_90pct`, `days_until_risk_medium`,
+  `days_until_risk_high`, `survival_curve`, `survival_risk_Nd`,
+  `replacement_candidate` (dan filter `replacement_candidates_only`),
+  prioritas `CRITICAL` (kombinasi kerusakan+scrap yang sekarang tidak
+  mungkin terjadi).
+- Endpoint `GET /api/v1/parts/{item_id}/scrap`,
+  `GET /api/v1/monitoring/metrics/scrap`.
+- CLI: `evaluate-survival`, `audit-scrap-outcomes`, `train-mtbf-candidate`,
+  dan blok scrap/survival di `bootstrap-ci`.
+- Dashboard: halaman `4_Perencanaan_Penggantian.py` (murni stock-planning
+  berbasis scrap - eksplisit di luar scope baru, lihat alasan di bawah),
+  bagian "MODEL KONDISI PASCAKERUSAKAN" di `6_Sistem.py`, kolom
+  waktu-tersisa (`estimasi_bulan_rusak`, `days_until_survival_90pct`) di
+  semua tabel prioritas.
+
+**Yang TETAP** (tidak tersentuh oleh cleanup ini - lihat §2, §4 untuk
+invariant terkait): model kerusakan (Q2, CatBoost) dengan seluruh
+metodologi gerbang presisinya (§11), alert lifecycle in-memory
+(`serving/alerts.py`, §17 - BELUM diganti persistent, itu Milestone 5
+terpisah), agregasi Terminal->PART (§14).
+
+**Kenapa** (bukan temuan model baru, murni keputusan scope): permintaan
+eksplisit user untuk fokus ulang sistem menjadi failure-prediction murni
+yang terintegrasi dengan aplikasi eksternal (lifecycle installation
+cycle/intervention/alert persistent) - lihat master-prompt refactor
+Terminal->Part->Item. Kebutuhan stok/penggantian spare part ditentukan
+sepenuhnya oleh teknisi/aplikasi eksternal, bukan lagi oleh model di
+sini - eksplisit di luar scope, bukan berarti pertanyaannya tidak penting.
+
+**Dampak pada §1**: kalimat "Kalau mau dibuka lagi: butuh perbaikan nyata
+di Recall@kapasitas DAN Precision@kapasitas survival..." di §1 tidak lagi
+relevan sebagai jalur reopen - membuka Survival lagi sekarang berarti
+membangun ulang dari nol (kode sudah dihapus), bukan sekadar mengubah
+keputusan cutover. `docs/EXPERIMENTS.md` (E-01 dst) TETAP dipertahankan
+sebagai riwayat penelitian, sesuai konvensi append-only - tidak dihapus
+meski kode yang dideskripsikannya sudah tidak ada.
+
+**Verifikasi**: `grep -rn "survival\|scrap" src/ --include=*.py -i` hanya
+boleh muncul sebagai (a) variabel lokal hazard-chaining di
+`engines/predict.py`/`serving/batch.py` (`survival = 1.0 - hazard`, istilah
+matematika umum, BUKAN model Q1), atau (b) komentar/docstring yang
+menjelaskan riwayat penghapusan ini.
+
+---

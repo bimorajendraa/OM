@@ -70,14 +70,11 @@ with st.container(border=True):
     with filter_cols[3]:
         horizon = st.selectbox("Horizon", [30, 60, 90, 120], format_func=lambda days: f"{days} hari")
 
-    replacement_only = st.checkbox("Hanya kandidat penggantian")
-
 try:
     data = api_client.recommendations(
         item_type=item_type,
         client=client,
         location=location,
-        replacement_candidates_only=replacement_only or None,
         official_queue_only=official_only,
         limit=500,
     )
@@ -113,8 +110,6 @@ ui.priority_table(
         "location",
         "failure_risk_level",
         probability_column,
-        "days_until_survival_90pct",
-        "estimasi_bulan_rusak",
         "recommended_action",
     ],
     empty_message=(

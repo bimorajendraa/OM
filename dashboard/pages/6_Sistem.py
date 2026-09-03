@@ -25,13 +25,9 @@ except api_client.ApiError as error:
     st.stop()
 
 failure_model = model.get("failure") or {}
-scrap_model = model.get("scrap") or {}
 failure_metrics = metrics.get("failure") or {}
-scrap_metrics = metrics.get("scrap") or {}
 failure_offline = failure_metrics.get("offline") or {}
 failure_live = failure_metrics.get("live") or {}
-scrap_offline = scrap_metrics.get("offline") or {}
-scrap_live = scrap_metrics.get("live") or {}
 
 ui.section_label("MODEL KERUSAKAN")
 ui.fact_grid([
@@ -51,23 +47,6 @@ with st.expander("Metrik uji model kerusakan"):
     if gate:
         st.caption("Status gerbang kualitas model")
         st.json(gate)
-
-ui.rule()
-
-ui.section_label("MODEL KONDISI PASCAKERUSAKAN")
-ui.fact_grid([
-    ("Versi model", scrap_model.get("model_version") or "-", True),
-    ("Tanggal training", scrap_model.get("training_date") or "-", True),
-    ("Data sampai", ui.format_date(scrap_live.get("data_through")), True),
-    ("PART dengan skor", f"{scrap_live.get('parts_with_scrap_score', 0):,}", True),
-])
-scrap_risk_counts = scrap_live.get("risk_level_counts") or {}
-st.caption(
-    f"Distribusi risiko saat ini — Tinggi: {scrap_risk_counts.get('HIGH', 0):,} · "
-    f"Sedang: {scrap_risk_counts.get('MEDIUM', 0):,} · Rendah: {scrap_risk_counts.get('LOW', 0):,}"
-)
-with st.expander("Metrik uji model kondisi pascakerusakan"):
-    st.json(scrap_offline.get("evaluation_metrics") or {})
 
 ui.rule()
 st.caption(

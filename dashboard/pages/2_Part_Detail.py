@@ -4,7 +4,6 @@ from __future__ import annotations
 import html
 
 import api_client
-import pandas as pd
 import streamlit as st
 import ui
 
@@ -63,12 +62,10 @@ if history and history.get("status") == "NOT_FOUND":
     history = None
 
 failure = data["failure"]
-scrap = data.get("scrap") or {}
 recommendation = data["recommendation"]
-installed_on = failure.get("installed_on")
 current_location = history["locations"][0]["location"] if history and history["locations"] else None
 location = data.get("location") or current_location or "Belum tercatat"
-item_type = scrap.get("item_type") or data.get("item_type") or "Jenis belum tercatat"
+item_type = data.get("item_type") or "Jenis belum tercatat"
 
 ui.rule()
 st.markdown("<div class='page-kicker'>DETAIL PART</div>", unsafe_allow_html=True)
@@ -78,7 +75,6 @@ st.caption(f"{item_type} · {location}")
 ui.fact_grid([
     ("Status", ui.badge_html(failure.get("risk_level")), False),
     ("Peluang rusak 30 hari", html.escape(api_client.percent(failure.get("failure_probability_30d"))), True),
-    ("Risiko tidak dapat diperbaiki", ui.badge_html(scrap.get("scrap_risk_level")), False),
     ("Data terakhir", html.escape(ui.format_date(data.get("as_of"))), True),
 ])
 
@@ -88,52 +84,10 @@ ui.recommendation_panel(
     recommendation.get("priority"),
 )
 
-if data.get("replacement_candidate"):
-    st.warning(
-        "Siapkan opsi pengganti. PART ini memiliki risiko kerusakan dan risiko tidak dapat diperbaiki "
-        "yang sama-sama tinggi; keputusan akhir tetap mengikuti hasil inspeksi."
-    )
-
 ui.section_label("RISIKO")
 with st.container(border=True):
     ui.horizon_metrics(failure)
     ui.probability_caption()
-    if scrap:
-        st.divider()
-        left, right = st.columns(2)
-        left.metric(
-            "Tidak dapat diperbaiki jika rusak",
-            api_client.percent(scrap.get("scrap_probability")),
-        )
-        right.metric(
-            "Perlu diganti dalam 30 hari",
-            api_client.percent(data.get("death_probability_30d")),
-        )
-        st.caption("Risiko penggantian bersifat perkiraan dan bukan keputusan untuk mengganti PART.")
-
-timeline_events: list[dict] = []
-if installed_on:
-    as_of = pd.Timestamp(data["as_of"])
-    install_ts = pd.Timestamp(installed_on)
-    timeline_events.append({
-        "offset_days": (install_ts - as_of).days,
-        "kind": "INSTALL",
-        "label": f"Dipasang · {install_ts.date()}",
-    })
-    timeline_events.append({"offset_days": 0, "kind": "SEKARANG", "label": "Sekarang"})
-    if history:
-        for event in history["failures"]:
-            event_ts = pd.Timestamp(event["date"])
-            if event_ts >= install_ts:
-                timeline_events.append({
-                    "offset_days": (event_ts - as_of).days,
-                    "kind": "CORRECTIVE",
-                    "label": f"{ui.event_status_label(event['status'])} · {event_ts.date()}",
-                })
-
-ui.section_label("PERKIRAAN WAKTU")
-with st.container(border=True):
-    ui.survival_advisory(failure, timeline_events, as_of=data.get("as_of"))
 
 explanation = data.get("explanation")
 if explanation:

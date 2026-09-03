@@ -13,15 +13,12 @@ import streamlit as st
 
 RISK_LEVEL_LABELS = {"HIGH": "TINGGI", "MEDIUM": "SEDANG", "LOW": "RENDAH"}
 PRIORITY_LABELS = {
-    "CRITICAL": "SANGAT MENDESAK",
     "HIGH": "MENDESAK",
     "MEDIUM": "SEDANG",
     "LOW": "RENDAH",
 }
 ACTION_LABELS = {
-    "INSPECT_AND_PREPARE_REPLACEMENT": "Periksa dan siapkan pengganti",
     "PRIORITIZE_INSPECTION": "Periksa segera",
-    "SCHEDULE_INSPECTION_AND_REVIEW_STOCK": "Jadwalkan pemeriksaan dan cek stok",
     "SCHEDULE_INSPECTION": "Jadwalkan pemeriksaan",
     "MONITOR": "Pantau kondisi",
 }
@@ -31,8 +28,6 @@ PROBABILITY_COLUMNS = {
     "failure_probability_60d",
     "failure_probability_90d",
     "failure_probability_120d",
-    "scrap_probability",
-    "death_probability_30d",
     "top_risk_probability",
 }
 
@@ -52,12 +47,6 @@ COLUMN_LABELS = {
     "failure_probability_90d": "PELUANG 90H",
     "failure_probability_120d": "PELUANG 120H",
     "failure_risk_level": "RISIKO",
-    "scrap_probability": "TIDAK DAPAT DIPERBAIKI",
-    "scrap_risk_level": "RISIKO PENGGANTIAN",
-    "death_probability_30d": "PERLU DIGANTI 30H",
-    "median_days_to_failure": "SISA UMUR",
-    "estimasi_bulan_rusak": "PERKIRAAN",
-    "days_until_survival_90pct": "RISIKO MULAI NAIK",
     "priority": "PRIORITAS",
     "recommended_action": "TINDAKAN",
     "active_parts": "PART AKTIF",
@@ -66,8 +55,6 @@ COLUMN_LABELS = {
     "low_risk_parts": "RISIKO RENDAH",
     "top_risk_item_id": "PART PALING BERISIKO",
     "top_risk_probability": "PELUANG 30H",
-    "nearest_median_days_to_failure": "PERKIRAAN TERDEKAT",
-    "replacement_candidates": "KANDIDAT PENGGANTIAN",
     "date": "TANGGAL",
     "status": "STATUS",
     "wo_type": "JENIS WO",
@@ -87,7 +74,6 @@ NAV_PAGES = [
     ("app.py", "Ringkasan", ":material/space_dashboard:"),
     ("pages/1_Parts.py", "Parts", ":material/list_alt:"),
     ("pages/3_Inspeksi.py", "Inspeksi", ":material/fact_check:"),
-    ("pages/4_Perencanaan_Penggantian.py", "Rencana Penggantian", ":material/inventory_2:"),
     ("pages/5_Terminal.py", "Terminal", ":material/location_on:"),
 ]
 
@@ -430,7 +416,7 @@ def priority_label(priority: str | None) -> str:
 
 def badge_html(value: str | None, priority: bool = False) -> str:
     label = priority_label(value) if priority else risk_label(value)
-    severity = {"HIGH": "high", "CRITICAL": "high", "MEDIUM": "medium", "LOW": "low"}.get(value or "", "unknown")
+    severity = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}.get(value or "", "unknown")
     return f'<span class="risk-badge risk-{severity}">{html.escape(label)}</span>'
 
 
@@ -438,51 +424,30 @@ def action_label(action: str | None) -> str:
     return ACTION_LABELS.get(action or "", action or "Belum ada tindakan")
 
 
-def estimated_failure_month(median_days: float | None, as_of: pd.Timestamp) -> str:
-    if median_days is None or pd.isna(median_days):
-        return "Belum cukup data"
-    target = as_of + pd.Timedelta(days=float(median_days))
-    return f"{BULAN_ID[target.month]} {target.year}"
-
-
 def days_label(days: float | None) -> str:
     return "Belum cukup data" if days is None or pd.isna(days) else f"~{days:.0f} hari"
 
 
-def rising_risk_label(days: float | None) -> str:
-    return days_label(days)
-
-
 def _display_frame(items: list[dict], columns: list[str], as_of: str | pd.Timestamp | None) -> pd.DataFrame:
     frame = pd.DataFrame(items).copy()
-    if "estimasi_bulan_rusak" in columns and "median_days_to_failure" in frame.columns and as_of is not None:
-        as_of_ts = pd.Timestamp(as_of)
-        frame["estimasi_bulan_rusak"] = frame["median_days_to_failure"].map(
-            lambda value: estimated_failure_month(value, as_of_ts)
-        )
     present = [column for column in columns if column in frame.columns]
     display = frame[present].copy()
     for column in PROBABILITY_COLUMNS & set(display.columns):
         display[column] = display[column].map(api_client.percent)
-    for column in ("failure_risk_level", "scrap_risk_level"):
-        if column in display.columns:
-            display[column] = display[column].map(risk_label)
+    if "failure_risk_level" in display.columns:
+        display["failure_risk_level"] = display["failure_risk_level"].map(risk_label)
     if "priority" in display.columns:
         display["priority"] = display["priority"].map(priority_label)
     if "recommended_action" in display.columns:
         display["recommended_action"] = display["recommended_action"].map(action_label)
     if "installation_age_days" in display.columns:
         display["installation_age_days"] = display["installation_age_days"].map(days_label)
-    if "median_days_to_failure" in display.columns:
-        display["median_days_to_failure"] = display["median_days_to_failure"].map(days_label)
-    if "days_until_survival_90pct" in display.columns:
-        display["days_until_survival_90pct"] = display["days_until_survival_90pct"].map(rising_risk_label)
     return display.rename(columns=COLUMN_LABELS)
 
 
 _CHIP_SKIP_COLUMNS = {
     "rank", "item_id", "item_type", "location", "terminal_label",
-    "failure_risk_level", "scrap_risk_level", "priority", "recommended_action",
+    "failure_risk_level", "priority", "recommended_action",
 }
 
 
@@ -490,15 +455,8 @@ def _chip_text(column: str, item: dict, as_of: str | pd.Timestamp | None) -> str
     label = COLUMN_LABELS.get(column, column)
     if column in PROBABILITY_COLUMNS:
         return f"{label} {api_client.percent(item.get(column))}"
-    if column == "days_until_survival_90pct":
-        return f"{label} {rising_risk_label(item.get(column))}"
-    if column in ("installation_age_days", "median_days_to_failure"):
+    if column == "installation_age_days":
         return f"{label} {days_label(item.get(column))}"
-    if column == "estimasi_bulan_rusak":
-        if as_of is None:
-            return None
-        value = estimated_failure_month(item.get("median_days_to_failure"), pd.Timestamp(as_of))
-        return f"{label} {value}"
     value = item.get(column)
     if value in (None, ""):
         return None
@@ -542,7 +500,7 @@ def priority_table(
             item_type = item.get("item_type") or "Jenis belum tercatat"
             badges = "".join(
                 badge_html(item.get(field), priority=(field == "priority"))
-                for field in ("failure_risk_level", "scrap_risk_level", "priority")
+                for field in ("failure_risk_level", "priority")
                 if field in columns
             )
             chips = " · ".join(
@@ -623,43 +581,6 @@ def fact_grid(items: list[tuple[str, str, bool] | tuple[str, str, bool, str]]) -
     st.markdown(f'<div class="fact-grid">{"".join(cells)}</div>', unsafe_allow_html=True)
 
 
-STATUS_LABELS = {
-    "INSTALLED": "Dipasang",
-    "DISMANTLED": "Dilepas",
-    "RETURNED": "Dikembalikan",
-    "OK": "Diperbaiki",
-    "UNREPAIRABLE": "Tidak dapat diperbaiki",
-    "BROKEN": "Rusak",
-}
-
-
-def event_status_label(status: str | None) -> str:
-    return STATUS_LABELS.get((status or "").upper(), status or "Tercatat")
-
-
-def survival_advisory(
-    failure: dict,
-    timeline_events: list[dict] | None = None,
-    as_of: str | pd.Timestamp | None = None,
-) -> None:
-    median = failure.get("median_days_to_failure")
-    rising = failure.get("days_until_survival_90pct")
-    left, right = st.columns(2)
-    left.metric("Risiko diperkirakan mulai meningkat", days_label(rising))
-    right.metric("Perkiraan sisa umur hingga failure", days_label(median))
-    if as_of is not None:
-        st.caption(f"Perkiraan bulan rusak: {estimated_failure_month(median, pd.Timestamp(as_of))}")
-    curve = failure.get("survival_curve")
-    if curve:
-        st.altair_chart(
-            survival_timeline_chart(curve, failure.get("curve_horizon_days"), timeline_events or []),
-            width="stretch",
-        )
-        st.caption("Kurva adalah perkiraan pendukung. Area abu-abu berada di luar jangkauan data pelatihan.")
-    else:
-        st.caption("Belum cukup data untuk menampilkan perkiraan waktu secara lengkap.")
-
-
 def capture_curve_chart(curve: pd.DataFrame, capacity: int) -> alt.LayerChart:
     base = alt.Chart(curve).encode(x=alt.X("n:Q", title="Jumlah PART yang diperiksa"))
     actual = base.mark_line(color="#155EEF", strokeWidth=2.2).encode(
@@ -670,43 +591,6 @@ def capture_curve_chart(curve: pd.DataFrame, capacity: int) -> alt.LayerChart:
         color="#B42318", strokeWidth=1.4
     ).encode(x="n:Q")
     return (actual + random_line + rule_chart).properties(height=220)
-
-
-def survival_timeline_chart(
-    curve_points: list[dict],
-    curve_horizon_days: int | None,
-    timeline_events: list[dict],
-    chart_max_days: int = 400,
-) -> alt.VConcatChart:
-    curve_df = pd.DataFrame(curve_points) if curve_points else pd.DataFrame(
-        {"days_from_now": [0], "survival_probability": [1.0]}
-    )
-    horizon = curve_horizon_days if curve_horizon_days is not None else int(curve_df["days_from_now"].max())
-    x_min = min([-30] + [event["offset_days"] for event in timeline_events]) if timeline_events else -30
-    x_scale = alt.Scale(domain=[x_min - 10, chart_max_days])
-    shade = alt.Chart(pd.DataFrame({"start": [horizon], "end": [chart_max_days]})).mark_rect(
-        opacity=0.12, color="#747D85"
-    ).encode(x=alt.X("start:Q", scale=x_scale), x2="end:Q")
-    line = alt.Chart(curve_df).mark_line(color="#155EEF", strokeWidth=2.2).encode(
-        x=alt.X("days_from_now:Q", title=None, scale=x_scale),
-        y=alt.Y("survival_probability:Q", title="Peluang belum rusak", scale=alt.Scale(domain=[0, 1])),
-    )
-    now_rule = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color="#171A1D", strokeDash=[2, 2]).encode(
-        x=alt.X("x:Q", scale=x_scale)
-    )
-    top = (shade + line + now_rule).properties(height=220)
-    if timeline_events:
-        events_df = pd.DataFrame(timeline_events)
-        markers = alt.Chart(events_df).mark_point(size=80, filled=True, color="#565E66").encode(
-            x=alt.X("offset_days:Q", title="Hari relatif terhadap sekarang", scale=x_scale),
-            y=alt.value(0),
-            tooltip=["label:N"],
-        ).properties(height=45)
-    else:
-        markers = alt.Chart(pd.DataFrame({"x": [0]})).mark_point(opacity=0).encode(
-            x=alt.X("x:Q", scale=x_scale)
-        ).properties(height=45)
-    return alt.vconcat(top, markers).resolve_scale(x="shared")
 
 
 MAP_HIGH_COLOR = [180, 35, 24, 205]

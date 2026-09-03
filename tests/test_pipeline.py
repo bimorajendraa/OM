@@ -6,12 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from partrisk.core import config, data_reader, features_survival
+from partrisk.core import config, data_reader
 from partrisk.core import features as feature_builder
 from partrisk.engines import predict as failure_model
 from partrisk.engines.failure import train
 from partrisk.engines.failure import train as training_utils
-from partrisk.engines.survival import train as failure_survival
 from tests.conftest import needs_database, needs_models
 
 
@@ -61,18 +60,6 @@ def test_kolom_fitur_kerusakan_konsisten_lewat_project_features():
     for step in range(4):
         features = feature_builder.project_features(raw, support, step)
         assert list(features.columns) == config.FEATURE_COLUMNS, f"step={step}"
-
-
-def test_kolom_fitur_scrap_persis_sama_dengan_config():
-    episodes = pd.DataFrame({
-        "item_type_clean": ["MOTOR", "PC", None],
-        "age_total_days": [100.0, 500.0, 10.0],
-        "cycle_age_days": [50.0, 100.0, 5.0],
-        "prior_repaired_count": [0, 2, 0],
-        "prior_failure_count": [1, 3, 1],
-    })
-    features = feature_builder.build_scrap_features(episodes, known_types=["MOTOR", "PC"])
-    assert list(features.columns) == config.SCRAP_FEATURE_COLUMNS
 
 
 def test_urutan_kolom_kategorikal_dan_numerik_tidak_bercampur():
@@ -341,24 +328,6 @@ def test_current_observations_tanpa_event_sama_sekali_dibuang():
     assert result.empty
 
 
-def test_survival_returned_dicensor_pada_waktu_part_dilepas():
-    cohort = pd.DataFrame({
-        "installed_on": pd.to_datetime(["2024-01-01"]),
-        "failure_onset_on": [pd.NaT],
-        "cycle_end_on": pd.to_datetime(["2024-07-01"]),
-        "cycle_end_reason": ["RETURNED"],
-        "is_recon_verified_negative_eligible": [True],
-    })
-
-    outcome = features_survival.assign_lifecycle_outcome(
-        cohort, pd.Timestamp("2026-08-03")
-    )
-
-    assert outcome["eligible"].iloc[0]
-    assert outcome["event_observed"].iloc[0] == 0
-    assert outcome["duration_days"].iloc[0] == 182.0
-
-
 @needs_database
 def test_get_cycles_tidak_membiarkan_part_yang_sudah_dilepas_tetap_aktif():
     cycles = data_reader.get_cycles()
@@ -478,7 +447,7 @@ def test_kandidat_dan_incumbent_identik_dipromosikan():
     assert promote is True
 
 
-def test_split_label_default_tetap_test_untuk_kompatibilitas_scrap():
+def test_split_label_default_tetap_test_untuk_kompatibilitas_mundur():
     candidate = _metrics(pr_auc=0.25, recall_at_capacity=0.35)
     incumbent = _metrics(pr_auc=0.20, recall_at_capacity=0.30)
     promote, reason, comparison = training_utils.decide_promotion(candidate, incumbent, "v1", force=False)
@@ -505,101 +474,6 @@ def test_split_label_tidak_mengubah_keputusan_hanya_label():
     )
     assert promote_test is False
     assert promote_val is False
-
-
-def _survival_metrics(brier_30: float, brier_90: float, key_type=int) -> dict:
-    return {"brier_at_horizon": {key_type(30): brier_30, key_type(90): brier_90}}
-
-
-def test_survival_promosi_pertama_kali_selalu_lolos():
-    approved, reason = failure_survival.decide_survival_promotion(_survival_metrics(0.05, 0.05), None)
-    assert approved is True
-    assert "belum ada" in reason
-
-
-def test_survival_kandidat_lebih_baik_di_kedua_horizon_dipromosikan():
-    candidate = _survival_metrics(0.04, 0.04)
-    incumbent = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(candidate, incumbent)
-    assert approved is True
-
-
-def test_survival_brier_30d_memburuk_menahan_promosi_walau_90d_membaik():
-    candidate = _survival_metrics(0.06, 0.03)
-    incumbent = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(candidate, incumbent)
-    assert approved is False
-
-
-def test_survival_brier_90d_memburuk_menahan_promosi_walau_30d_membaik():
-    candidate = _survival_metrics(0.03, 0.06)
-    incumbent = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(candidate, incumbent)
-    assert approved is False
-
-
-def test_survival_kandidat_dan_incumbent_identik_dipromosikan():
-    same = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(same, dict(same))
-    assert approved is True
-
-
-def test_survival_split_label_default_validation():
-    candidate = _survival_metrics(0.04, 0.04)
-    incumbent = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(candidate, incumbent)
-    assert reason.startswith("[VALIDATION]")
-
-
-def test_survival_split_label_bisa_diganti_test_untuk_laporan():
-    candidate = _survival_metrics(0.04, 0.04)
-    incumbent = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(candidate, incumbent, split_label="TEST")
-    assert reason.startswith("[TEST]")
-    assert approved is True
-
-
-def test_survival_incumbent_dari_metadata_json_kunci_string_tetap_terbaca():
-    candidate = _survival_metrics(0.04, 0.04, key_type=int)
-    incumbent = _survival_metrics(0.05, 0.05, key_type=str)
-    approved, reason = failure_survival.decide_survival_promotion(candidate, incumbent)
-    assert approved is True
-    assert "0.0400" in reason and "0.0500" in reason
-
-
-def _mae_median(mae_days: float, n_usable: int = 100) -> dict:
-    return {"mae_days": mae_days, "n_usable": n_usable, "n_event_observed": n_usable, "bias_days": mae_days}
-
-
-def test_survival_mae_median_lebih_buruk_menahan_promosi_walau_brier_membaik():
-    candidate = _survival_metrics(0.04, 0.04)
-    incumbent = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(
-        candidate, incumbent,
-        candidate_mae_median=_mae_median(500.0), incumbent_mae_median=_mae_median(450.0),
-    )
-    assert approved is False
-    assert "MAE median" in reason
-
-
-def test_survival_mae_median_lebih_baik_dipromosikan():
-    candidate = _survival_metrics(0.04, 0.04)
-    incumbent = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(
-        candidate, incumbent,
-        candidate_mae_median=_mae_median(400.0), incumbent_mae_median=_mae_median(450.0),
-    )
-    assert approved is True
-
-
-def test_survival_mae_median_tanpa_baseline_incumbent_dilewati():
-    candidate = _survival_metrics(0.04, 0.04)
-    incumbent = _survival_metrics(0.05, 0.05)
-    approved, reason = failure_survival.decide_survival_promotion(
-        candidate, incumbent, candidate_mae_median=_mae_median(500.0), incumbent_mae_median=None,
-    )
-    assert approved is True
-    assert "tidak ada baseline incumbent" in reason
 
 
 @needs_database
@@ -654,7 +528,14 @@ def test_current_batch_matches_golden_baseline(batch):
     live_path = BASELINE_PATH.parent / "_live_comparison_scratch.parquet"
     cli.generate(live_path)
 
-    assert cli.compare(BASELINE_PATH, live_path), (
-        "Batch live BERBEDA dari golden baseline - lihat detail perbedaan di output di atas. "
-        "Kalau ini terjadi setelah langkah MOVE, langkah itu bukan pure move."
+    q2_columns = {
+        "item_id", "failure_probability_30d", "failure_probability_60d",
+        "failure_probability_90d", "failure_probability_120d",
+        "failure_risk_level", "gate_flagged",
+    }
+    assert cli.compare(BASELINE_PATH, live_path, columns=q2_columns), (
+        "Angka model kerusakan (Q2) BERBEDA dari golden baseline yang direkam SEBELUM "
+        "Milestone 1 (penghapusan Survival/Scrap) - lihat detail perbedaan di output di "
+        "atas. Hanya kolom Q2 yang dibandingkan di sini karena skema frame SENGAJA "
+        "menyusut (kolom Survival/Scrap dihapus), bukan pure-move."
     )

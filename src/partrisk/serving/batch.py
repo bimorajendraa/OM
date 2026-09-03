@@ -16,9 +16,6 @@ from partrisk.core import config
 from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
 from partrisk.engines import predict as failure_model
-from partrisk.engines import predict as death_risk
-from partrisk.engines import predict as scrap_model
-from partrisk.engines.survival import predict as predict_survival
 from partrisk.serving import alerts as alert_store
 from partrisk.serving import single as serving
 
@@ -206,12 +203,9 @@ def _compute(generation_value: int) -> BatchScores:
 
     data_end = pd.Timestamp(cycles["dataset_max_event_on"].max())
 
-    failure, snapshot, full_snapshot = _score_failure(cycles, events, episodes, data_end)
-    scrap = _score_scrap(events, cycles, data_end, failure["item_id"])
-    survival_advisory = _score_survival_advisory(full_snapshot, events, cycles, episodes, terminal_raw)
+    failure, snapshot = _score_failure(cycles, events, episodes, data_end)
 
-    frame = failure.merge(scrap, on="item_id", how="left")
-    frame = frame.merge(survival_advisory, on="item_id", how="left")
+    frame = failure.copy()
     frame = _attach_context(frame, events)
     frame = _attach_terminal(frame, terminal_raw)
     frame = _attach_recommendation(frame)
@@ -225,14 +219,13 @@ def _compute(generation_value: int) -> BatchScores:
         generation=generation_value,
         model_version={
             "failure": failure_model.load_failure_model()[2]["model_version"],
-            "scrap": scrap_model.load_scrap_model()[2]["model_version"],
         },
     )
 
 
 def _score_failure(
     cycles: pd.DataFrame, events: pd.DataFrame, episodes: pd.DataFrame, data_end: pd.Timestamp
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     model, calibrator, metadata = failure_model.load_failure_model()
 
     snapshot = feature_builder.current_observations(cycles, events)
@@ -299,110 +292,17 @@ def _score_failure(
     features_by_item.index = pd.Index(
         snapshot["item_identifier_clean"].to_numpy(), name="item_id"
     )
-    full_snapshot = snapshot.drop(columns=config.DEGRADATION_FEATURES + config.LOCAL_DENSITY_FEATURES)
-    return result, features_by_item, full_snapshot
-
-
-def _score_survival_advisory(
-    full_snapshot: pd.DataFrame, events: pd.DataFrame, cycles: pd.DataFrame,
-    episodes: pd.DataFrame, terminal_raw: pd.DataFrame,
-) -> pd.DataFrame:
-    item_ids = full_snapshot["item_identifier_clean"].to_numpy()
-    try:
-        model, encoder, metadata, calibrators = predict_survival.load_model()
-    except FileNotFoundError:
-        return pd.DataFrame({
-            "item_id": item_ids,
-            "median_days_to_failure": np.nan,
-            "days_until_survival_90pct": np.nan,
-            "days_until_risk_medium": np.nan,
-            "days_until_risk_high": np.nan,
-        })
-    return predict_survival.score_batch(
-        full_snapshot, events, cycles, episodes, terminal_raw, model, encoder, metadata, calibrators
-    )
-
-
-def _score_scrap(
-    events: pd.DataFrame,
-    cycles: pd.DataFrame,
-    data_end: pd.Timestamp,
-    items: pd.Series,
-) -> pd.DataFrame:
-    model, calibrator, metadata = scrap_model.load_scrap_model()
-
-    state = _scrap_states(events, cycles, data_end, items)
-    if state.empty:
-        return pd.DataFrame(columns=[
-            "item_id", "item_type", "scrap_probability", "scrap_risk_level",
-            "item_type_known_to_model",
-        ])
-
-    features = feature_builder.build_scrap_features(state, metadata["known_item_types"])
-    raw = model.predict_proba(features)[:, 1]
-    probability = calibrator.predict_proba(raw.reshape(-1, 1))[:, 1]
-
-    cutoffs = metadata["risk_cutoffs"]
-    return pd.DataFrame({
-        "item_id": state["item_identifier_clean"].to_numpy(),
-        "item_type": state["item_type_clean"].to_numpy(),
-        "scrap_probability": np.round(probability, 4),
-        "scrap_risk_level": [
-            scrap_model.risk_level(value, cutoffs) for value in probability
-        ],
-        "item_type_known_to_model": state["item_type_clean"]
-        .isin(metadata["known_item_types"])
-        .to_numpy(),
-    })
-
-
-def _scrap_states(
-    events: pd.DataFrame,
-    cycles: pd.DataFrame,
-    data_end: pd.Timestamp,
-    items: pd.Series,
-) -> pd.DataFrame:
-    moment = pd.Timestamp(data_end)
-    wanted = pd.Index(pd.unique(pd.Series(items)))
-
-    seen = events.loc[events["item_identifier_clean"].isin(wanted)].copy()
-    seen["created_on"] = pd.to_datetime(seen["created_on"])
-    seen = seen.loc[seen["created_on"] <= moment]
-    if seen.empty:
-        return pd.DataFrame()
-
-    status = seen["status_clean"].fillna("")
-    seen["_is_repaired"] = status.eq(config.REPAIR_COMPLETED_STATUS)
-    seen["_is_failure"] = seen["is_failure_onset"].fillna(False).astype(bool)
-
-    grouped = seen.groupby("item_identifier_clean", sort=False)
-    state = pd.DataFrame({
-        "item_type_clean": grouped["item_type_clean"].last(),
-        "first_seen_on": grouped["created_on"].min(),
-        "prior_repaired_count": grouped["_is_repaired"].sum().astype("int64"),
-        "prior_failure_count": grouped["_is_failure"].sum().astype("int64"),
-    })
-
-    installs = cycles.loc[cycles["item_identifier_clean"].isin(wanted)].copy()
-    installs["installed_on"] = pd.to_datetime(installs["installed_on"])
-    installs = installs.loc[installs["installed_on"] <= moment]
-    last_install = installs.groupby("item_identifier_clean")["installed_on"].max()
-
-    state = state.reindex(wanted.intersection(state.index))
-    state["failure_onset_on"] = moment
-    state["age_total_days"] = (
-        moment - state["first_seen_on"]
-    ).dt.total_seconds() / 86400.0
-    state["cycle_age_days"] = (
-        moment - pd.DatetimeIndex(state.index.map(last_install))
-    ).total_seconds() / 86400.0
-    return state.reset_index(names="item_identifier_clean")
+    return result, features_by_item
 
 
 def _attach_context(frame: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
-    known = events.loc[events["place_canonical_clean"].notna()]
-    location = known.groupby("item_identifier_clean")["place_canonical_clean"].last()
+    known_location = events.loc[events["place_canonical_clean"].notna()]
+    location = known_location.groupby("item_identifier_clean")["place_canonical_clean"].last()
     frame["location"] = frame["item_id"].map(location)
+
+    known_type = events.loc[events["item_type_clean"].notna()]
+    item_type = known_type.groupby("item_identifier_clean")["item_type_clean"].last()
+    frame["item_type"] = frame["item_id"].map(item_type)
     return frame
 
 
@@ -427,24 +327,10 @@ def _attach_terminal(frame: pd.DataFrame, terminal_raw: pd.DataFrame) -> pd.Data
 
 
 def _attach_recommendation(frame: pd.DataFrame) -> pd.DataFrame:
-    horizon = config.TARGET_HORIZON_DAYS
-    scrap_levels = [
-        None if pd.isna(level) else level for level in frame["scrap_risk_level"]
-    ]
-    decisions = [
-        serving.recommend(failure_level, scrap_level)
-        for failure_level, scrap_level in zip(frame["failure_risk_level"], scrap_levels)
-    ]
+    decisions = [serving.recommend(failure_level) for failure_level in frame["failure_risk_level"]]
     frame["priority"] = [decision["priority"] for decision in decisions]
     frame["recommended_action"] = [decision["action"] for decision in decisions]
     frame["recommendation_message"] = [decision["message"] for decision in decisions]
-    frame["replacement_candidate"] = [
-        serving.is_replacement_candidate(failure_level, scrap_level)
-        for failure_level, scrap_level in zip(frame["failure_risk_level"], scrap_levels)
-    ]
-    frame[f"death_probability_{horizon}d"] = death_risk.death_probability(
-        frame[f"failure_probability_{horizon}d"], frame["scrap_probability"]
-    )
     return frame
 
 
@@ -457,7 +343,6 @@ def filter_scores(
     location: str | None = None,
     terminal_id: str | None = None,
     search: str | None = None,
-    replacement_candidates_only: bool = False,
     official_queue_only: bool = True,
 ) -> pd.DataFrame:
     result = frame
@@ -480,8 +365,6 @@ def filter_scores(
         result = result[result["location"].fillna("").str.upper().eq(location.upper())]
     if terminal_id:
         result = result[result["terminal_id"].astype("string").eq(str(terminal_id))]
-    if replacement_candidates_only:
-        result = result[result["replacement_candidate"]]
     return result
 
 
@@ -494,7 +377,6 @@ def summary(frame: pd.DataFrame) -> dict:
         "high_risk_parts": int(levels.get("HIGH", 0)),
         "medium_risk_parts": int(levels.get("MEDIUM", 0)),
         "low_risk_parts": int(levels.get("LOW", 0)),
-        "replacement_candidates": int(frame["replacement_candidate"].sum()),
         "priority_counts": {
             str(name): int(count)
             for name, count in frame["priority"].value_counts().items()
@@ -513,17 +395,14 @@ def location_summary(frame: pd.DataFrame) -> pd.DataFrame:
         active_parts=("item_id", "count"),
         high_risk_parts=("failure_risk_level", lambda s: int((s == "HIGH").sum())),
         medium_risk_parts=("failure_risk_level", lambda s: int((s == "MEDIUM").sum())),
-        replacement_candidates=("replacement_candidate", "sum"),
     )
-    grouped["replacement_candidates"] = grouped["replacement_candidates"].astype(int)
     return grouped.sort_values("high_risk_parts", ascending=False)
 
 
 _TERMINAL_COLUMNS = [
     "terminal_id", "terminal_label", "terminal_model_name", "active_parts",
     "high_risk_parts", "medium_risk_parts", "low_risk_parts",
-    "top_risk_item_id", "top_risk_probability", "nearest_median_days_to_failure", "location",
-    "replacement_candidates",
+    "top_risk_item_id", "top_risk_probability", "location",
 ]
 
 
@@ -550,9 +429,7 @@ def terminal_summary(frame: pd.DataFrame) -> pd.DataFrame:
         high_risk_parts=("failure_risk_level", lambda s: int((s == "HIGH").sum())),
         medium_risk_parts=("failure_risk_level", lambda s: int((s == "MEDIUM").sum())),
         low_risk_parts=("failure_risk_level", lambda s: int((s == "LOW").sum())),
-        replacement_candidates=("replacement_candidate", "sum"),
     )
-    grouped["replacement_candidates"] = grouped["replacement_candidates"].astype(int)
 
     top_risk = (
         known.sort_values("tier_score", ascending=False)
@@ -560,15 +437,8 @@ def terminal_summary(frame: pd.DataFrame) -> pd.DataFrame:
         .first()[["item_id", prob_column]]
         .rename(columns={"item_id": "top_risk_item_id", prob_column: "top_risk_probability"})
     )
-    nearest = (
-        known.dropna(subset=["median_days_to_failure"])
-        .sort_values("median_days_to_failure", ascending=True)
-        .groupby("terminal_id")
-        .first()[["median_days_to_failure"]]
-        .rename(columns={"median_days_to_failure": "nearest_median_days_to_failure"})
-    )
 
-    grouped = grouped.join(top_risk).join(nearest)
+    grouped = grouped.join(top_risk)
     return grouped.sort_values(
         ["high_risk_parts", "medium_risk_parts"], ascending=False
     )
@@ -580,7 +450,7 @@ def facets(frame: pd.DataFrame) -> dict[str, list[str]]:
 
     return {
         "risk_levels": ["HIGH", "MEDIUM", "LOW"],
-        "priorities": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+        "priorities": ["HIGH", "MEDIUM", "LOW"],
         "item_types": values("item_type"),
         "clients": values("client"),
         "locations": values("location"),

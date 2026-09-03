@@ -18,7 +18,6 @@ def test_health(client):
     body = response.json()
     assert body["status"] in ("ok", "degraded")
     assert body["model_version"]["failure"]
-    assert body["model_version"]["scrap"]
 
 
 def test_health_dengan_cek_database(client):
@@ -29,15 +28,8 @@ def test_health_dengan_cek_database(client):
 def test_model_info(client):
     body = client.get("/api/v1/model").json()
     assert body["failure"]["model_version"]
-    assert body["scrap"]["model_version"]
     assert "risk_cutoffs" in body["failure"]
-    assert "risk_cutoffs" in body["scrap"]
     assert body["failure"]["horizons_days"] == HORIZONS
-
-    survival = body.get("survival")
-    if survival is not None:
-        assert "validation_metrics" in survival and "test_metrics" in survival
-        assert "c_index" in survival["validation_metrics"]
 
 
 def test_prediksi_kerusakan_satu_part(client, scorable_item):
@@ -53,15 +45,6 @@ def test_risiko_kumulatif_tidak_menurun(client, scorable_item):
     failure = client.get(f"/api/v1/parts/{scorable_item}/failure").json()["failure"]
     values = [failure[f"failure_probability_{days}d"] for days in HORIZONS]
     assert values == sorted(values)
-
-
-def test_prediksi_scrap_satu_part(client, scorable_item):
-    body = client.get(f"/api/v1/parts/{scorable_item}/scrap").json()
-    assert body["status"] == "SCORED"
-    scrap = body["scrap"]
-    assert 0.0 <= scrap["scrap_probability"] <= 1.0
-    assert scrap["scrap_risk_level"] in ("LOW", "MEDIUM", "HIGH")
-    assert scrap["scrap_risk_basis"]
 
 
 def test_assessment_gabungan(client, scorable_item):
@@ -245,17 +228,6 @@ def test_paging_rekomendasi(client):
     assert ids.isdisjoint({item["item_id"] for item in second["items"]})
 
 
-def test_kandidat_penggantian(client):
-    body = client.get(
-        "/api/v1/recommendations",
-        params={"replacement_candidates_only": True, "limit": 50, "official_queue_only": False},
-    ).json()
-    for item in body["items"]:
-        assert item["replacement_candidate"] is True
-        assert item["scrap_risk_level"] == "HIGH"
-        assert item["failure_risk_level"] in ("MEDIUM", "HIGH")
-
-
 def test_overview(client):
     body = client.get("/api/v1/overview", params={"top": 5}).json()
     summary = body["summary"]
@@ -377,7 +349,6 @@ def test_assessment_cocok_dengan_daftar_prioritas(client):
         assert detail["failure"][column] == listed[column]
     assert detail["failure"]["risk_level"] == listed["failure_risk_level"]
     assert detail["recommendation"]["action"] == listed["recommended_action"]
-    assert detail["scrap"]["scrap_probability"] == listed["scrap_probability"]
 
 
 @pytest.fixture(scope="module")

@@ -17,8 +17,6 @@ PACKAGE_DIR = Path(os.environ.get("PARTRISK_HOME", str(Path(__file__).resolve().
 MODEL_DIR = Path(os.environ.get("PARTRISK_MODEL_DIR", str(PACKAGE_DIR / "models")))
 ENV_FILE = Path(os.environ.get("PARTRISK_ENV_FILE", str(PACKAGE_DIR / ".env")))
 FAILURE_MODEL_DIR = MODEL_DIR / "failure"
-SCRAP_MODEL_DIR = MODEL_DIR / "scrap"
-SURVIVAL_MODEL_DIR = MODEL_DIR / "survival"
 
 
 def db_settings() -> dict[str, str]:
@@ -133,36 +131,6 @@ FAILURE_CAPACITY_PER_MONTH = 200
 
 
 FAILURE_GATE_TARGET_PRECISION = 0.40
-
-
-SCRAP_STATUS = ("UNREPAIRABLE", "BROKEN")
-FAILURE_OUTCOME_STATUS = ("UNREPAIRABLE", "BROKEN", "SENDLOG (BROKEN)")
-REPAIR_COMPLETED_STATUS = "REPAIRED"
-
-SCRAP_ERA_START = "2025-04-01"
-SCRAP_EMBARGO_DAYS = 30
-
-SCRAP_MIN_TYPE_SUPPORT = 20
-
-SCRAP_CATEGORICAL_FEATURES = ["item_type_category"]
-SCRAP_NUMERIC_FEATURES = [
-    "log_age_total",
-    "log_cycle_age",
-    "log_prior_repaired_count",
-    "has_prior_repair",
-    "log_prior_failure_count",
-    "is_first_failure_ever",
-]
-SCRAP_FEATURE_COLUMNS = SCRAP_CATEGORICAL_FEATURES + SCRAP_NUMERIC_FEATURES
-
-SCRAP_RANDOM_STATE = 42
-
-SCRAP_CAPACITY_PER_MONTH = 3
-SCRAP_MEDIUM_CAPACITY_MULTIPLIER = 2.0
-SCRAP_TEST_START = "2026-04-01"
-SCRAP_ROLLING_CUTOFFS = ["2025-10-01", "2026-01-01"]
-
-SCRAP_MODEL_NAME = "Gabungan LogReg + RF"
 
 
 APPROVED_LOCATION_ALIAS = {"GUDANG NUTECH": "GUDANG NI"}

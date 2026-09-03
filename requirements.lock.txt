@@ -11,15 +11,6 @@
 # jangan diedit manual.
 #
 # Python yang dipakai membuat snapshot ini: 3.13.3
-#
-# PENGECUALIAN dari `pip freeze` murni: scikit-survival==0.28.0 SENGAJA
-# TIDAK dicantumkan di sini walau dipakai runtime (predict/survival.py,
-# field advisory mode aditif - lihat gate_decision.md G7). Dependensinya
-# `ecos` tidak punya wheel py3.13 dan image tidak punya gcc untuk build
-# dari source; ecos sendiri cuma dipakai SurvivalSVM yang tidak dipakai
-# proyek ini. Dockerfile memasangnya di RUN terpisah dengan --no-deps
-# SETELAH baris di bawah (numexpr/osqp/dst di sini adalah dependensi
-# riilnya yang memang punya wheel).
 
 altair==6.2.2
 annotated-doc==0.0.5

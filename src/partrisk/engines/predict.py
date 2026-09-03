@@ -12,10 +12,6 @@ from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
 
 
-def death_probability(failure_probability, scrap_probability):
-    return round(failure_probability * scrap_probability, 5)
-
-
 def risk_level(probability: float, cutoffs: dict[str, float]) -> str:
     if probability >= cutoffs["high"]:
         return "HIGH"
@@ -162,102 +158,14 @@ fleet_snapshot = _fleet_snapshot
 item_type_density_snapshot = _item_type_density_snapshot
 
 
-_LOADED_SCRAP: tuple[object, object, dict] | None = None
-
-
-class ScrapNotScorable(LookupError):
-    pass
-
-
-def _load_scrap_model() -> tuple[object, object, dict]:
-    global _LOADED_SCRAP
-    if _LOADED_SCRAP is not None:
-        return _LOADED_SCRAP
-
-    pointer = config.SCRAP_MODEL_DIR / "CURRENT"
-    if not pointer.exists():
-        raise FileNotFoundError(
-            f"Belum ada model scrap di {config.SCRAP_MODEL_DIR}. "
-            "Jalankan dulu: python train_scrap.py"
-        )
-    directory = config.SCRAP_MODEL_DIR / pointer.read_text(encoding="utf-8").strip()
-    model = joblib.load(directory / "model.joblib")
-    calibrator = joblib.load(directory / "calibrator.joblib")
-    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-    _LOADED_SCRAP = (model, calibrator, metadata)
-    return _LOADED_SCRAP
-
-
-def predict_scrap(item_id: str) -> dict:
-    model, calibrator, metadata = _load_scrap_model()
-
-    data_end = data_reader.get_dataset_max_event_on()
-    events = data_reader.get_events(item_id)
-    if events.empty:
-        raise ScrapNotScorable(f"PART '{item_id}' tidak ditemukan di database.")
-
-    cycles = data_reader.get_cycles(item_id, data_end)
-    state = feature_builder.current_state(events, cycles, data_end)
-    if state.empty:
-        raise ScrapNotScorable(f"PART '{item_id}' belum punya riwayat yang bisa dinilai.")
-
-    features = feature_builder.build_scrap_features(state, metadata["known_item_types"])
-    raw = model.predict_proba(features)[:, 1]
-    probability = float(calibrator.predict_proba(raw.reshape(-1, 1))[:, 1][0])
-
-    known = state["item_type_clean"].iloc[0] in metadata["known_item_types"]
-    return {
-        "item_id": state["item_identifier_clean"].iloc[0],
-        "scrap_probability": round(probability, 4),
-        "scrap_risk_level": risk_level(probability, metadata["risk_cutoffs"]),
-        "scrap_risk_basis": (
-            "dibandingkan kerusakan lain yang masuk bengkel, bukan terhadap "
-            "seluruh PART aktif"
-        ),
-        "item_type": state["item_type_clean"].iloc[0],
-        "item_type_known_to_model": bool(known),
-        "model_version": metadata["model_version"],
-        "as_of": str(data_end),
-    }
-
-
-def predict_death_risk(item_id: str) -> dict:
-    failure = predict(item_id)
-    scrap = predict_scrap(item_id)
-    horizon = config.TARGET_HORIZON_DAYS
-    failure_probability = failure[f"failure_probability_{horizon}d"]
-    scrap_probability = scrap["scrap_probability"]
-
-    return {
-        "item_id": scrap["item_id"],
-        f"failure_probability_{horizon}d": failure_probability,
-        "scrap_probability": scrap_probability,
-        f"death_probability_{horizon}d": death_probability(
-            failure_probability, scrap_probability
-        ),
-        "failure_risk_level": failure["risk_level"],
-        "scrap_risk_level": scrap["scrap_risk_level"],
-        "item_type_known_to_model": scrap["item_type_known_to_model"],
-        "model_version": {
-            "failure": failure["model_version"],
-            "scrap": scrap["model_version"],
-        },
-        "as_of": scrap["as_of"],
-    }
-
-
-load_scrap_model = _load_scrap_model
-
-
 def main() -> int:
     if len(sys.argv) < 2:
-        print("Pemakaian: python -m partrisk.engines.predict <item_id> [--scrap]")
+        print("Pemakaian: python -m partrisk.engines.predict <item_id>")
         return 1
     item_id = sys.argv[1]
-    scrap_mode = len(sys.argv) > 2 and sys.argv[2] == "--scrap"
     try:
-        result = predict_death_risk(item_id) if scrap_mode else predict(item_id)
-    except (FailureNotScorable, ScrapNotScorable) as error:
+        result = predict(item_id)
+    except FailureNotScorable as error:
         print(f"[TIDAK BISA DISKOR] {error}")
         return 1
     print(json.dumps(result, indent=2, ensure_ascii=False))

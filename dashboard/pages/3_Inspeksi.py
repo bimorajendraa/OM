@@ -37,12 +37,10 @@ tab_list, tab_map = st.tabs(["Daftar Inspeksi", "Peta Persebaran"])
 
 with tab_list:
     items = data["items"]
-    critical = [item for item in items if item.get("priority") == "CRITICAL"]
     high = [item for item in items if item.get("priority") == "HIGH"]
     normal = [item for item in items if item.get("priority") in ("MEDIUM", "LOW")]
 
     groups = [
-        ("CRITICAL — SANGAT MENDESAK", critical, "Periksa hari ini."),
         ("HIGH — MENDESAK", high, "Jadwalkan pemeriksaan dalam beberapa hari."),
         ("NORMAL", normal, "Pantau, belum perlu tindakan segera."),
     ]
@@ -54,8 +52,6 @@ with tab_list:
         "location",
         "failure_risk_level",
         "failure_probability_30d",
-        "days_until_survival_90pct",
-        "estimasi_bulan_rusak",
         "recommended_action",
     ]
 
@@ -111,7 +107,6 @@ with tab_map:
                 ("Risiko tinggi", f"{top_location['high_risk_parts']:,}", True, "danger"),
                 ("Risiko sedang", f"{top_location['medium_risk_parts']:,}", True),
                 ("PART aktif", f"{top_location['active_parts']:,}", True),
-                ("Kandidat penggantian", f"{top_location['replacement_candidates']:,}", True),
             ])
             if st.button(f"Lihat daftar PART di {top_location['location']}", key="goto_top_location"):
                 st.session_state["map_location_filter"] = top_location["location"]
@@ -181,7 +176,6 @@ with tab_map:
                     ("PART aktif", f"{point['active_parts']:,}", True),
                     ("Risiko tinggi", f"{point['high_risk_parts']:,}", True),
                     ("Risiko sedang", f"{point['medium_risk_parts']:,}", True),
-                    ("Kandidat penggantian", f"{point['replacement_candidates']:,}", True),
                 ])
                 if st.button(f"Lihat daftar PART di {point['location']}", key="goto_selected_location"):
                     st.session_state["map_location_filter"] = point["location"]
@@ -200,7 +194,7 @@ with tab_map:
                 sorted_resolved,
                 columns=[
                     "location", "active_parts", "high_risk_parts",
-                    "medium_risk_parts", "replacement_candidates",
+                    "medium_risk_parts",
                 ],
             )
     else:

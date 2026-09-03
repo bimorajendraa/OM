@@ -17,14 +17,6 @@ WORKDIR /app
 COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
-# scikit-survival terpisah dari baris di atas (--no-deps): dependensinya
-# `ecos` tidak punya wheel py3.13 dan image ini tidak punya gcc untuk build
-# dari source - ecos cuma dipakai SurvivalSVM yang tidak dipakai proyek ini.
-# Dependensi RIIL scikit-survival (numexpr, osqp, dst) sudah terpasang lewat
-# requirements.lock.txt di atas - lihat catatan di file itu dan
-# reports/gate_decision.md G7.
-RUN pip install --no-cache-dir --no-deps scikit-survival==0.28.0
-
 # Paket partrisk sendiri (src/partrisk/) di layer terpisah dari requirements
 # di atas - perubahan kode tidak memaksa install ulang seluruh dependensi.
 # --no-deps: requirements.lock.txt di atas SUDAH otoritatif untuk versi

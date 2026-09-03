@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import numpy as np
 import pandas as pd
 import psycopg
@@ -10,7 +8,6 @@ from partrisk.core import config
 from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
 from partrisk.engines import predict
-from partrisk.engines.survival import predict as predict_survival
 from partrisk.serving import alerts as alert_store
 from partrisk.serving import batch as serving_batch
 
@@ -91,87 +88,32 @@ def location_history(events: pd.DataFrame) -> list[dict]:
 
 RISK_LEVELS = ("LOW", "MEDIUM", "HIGH")
 
-_DECISION_TABLE: dict[tuple[str, str], tuple[str, str, str]] = {
-    ("HIGH", "HIGH"): (
-        "CRITICAL",
-        "INSPECT_AND_PREPARE_REPLACEMENT",
-        "Risiko kerusakan tinggi dan kecil kemungkinan bisa diperbaiki bila "
-        "rusak. Periksa lebih awal dan siapkan unit pengganti.",
-    ),
-    ("HIGH", "MEDIUM"): (
-        "HIGH",
-        "PRIORITIZE_INSPECTION",
-        "Risiko kerusakan tinggi. Dahulukan pemeriksaan, dan cek ketersediaan "
-        "unit pengganti.",
-    ),
-    ("HIGH", "LOW"): (
-        "HIGH",
-        "PRIORITIZE_INSPECTION",
-        "Risiko kerusakan tinggi, tetapi bila rusak umumnya masih bisa "
-        "diperbaiki. Dahulukan pemeriksaan.",
-    ),
-    ("MEDIUM", "HIGH"): (
-        "MEDIUM",
-        "SCHEDULE_INSPECTION_AND_REVIEW_STOCK",
-        "Risiko kerusakan sedang, tetapi bila rusak kecil kemungkinan bisa "
-        "diperbaiki. Jadwalkan pemeriksaan dan tinjau stok pengganti.",
-    ),
-    ("MEDIUM", "MEDIUM"): (
-        "MEDIUM",
-        "SCHEDULE_INSPECTION",
-        "Risiko kerusakan sedang. Jadwalkan pemeriksaan pada siklus terdekat.",
-    ),
-    ("MEDIUM", "LOW"): (
-        "MEDIUM",
-        "SCHEDULE_INSPECTION",
-        "Risiko kerusakan sedang. Jadwalkan pemeriksaan pada siklus terdekat.",
-    ),
-    ("LOW", "HIGH"): (
-        "LOW",
-        "MONITOR",
-        "Risiko kerusakan rendah. Belum perlu tindakan, tetapi bila nanti "
-        "rusak kemungkinan besar tidak bisa diperbaiki.",
-    ),
-    ("LOW", "MEDIUM"): ("LOW", "MONITOR", "Risiko kerusakan rendah. Cukup dipantau."),
-    ("LOW", "LOW"): ("LOW", "MONITOR", "Risiko kerusakan rendah. Cukup dipantau."),
-}
-
-_FAILURE_ONLY: dict[str, tuple[str, str, str]] = {
+_RECOMMENDATION_TABLE: dict[str, tuple[str, str, str]] = {
     "HIGH": (
         "HIGH",
         "PRIORITIZE_INSPECTION",
-        "Risiko kerusakan tinggi. Dahulukan pemeriksaan. Risiko scrap belum "
-        "bisa dinilai untuk PART ini.",
+        "Risiko kerusakan tinggi. Dahulukan pemeriksaan.",
     ),
     "MEDIUM": (
         "MEDIUM",
         "SCHEDULE_INSPECTION",
-        "Risiko kerusakan sedang. Jadwalkan pemeriksaan. Risiko scrap belum "
-        "bisa dinilai untuk PART ini.",
+        "Risiko kerusakan sedang. Jadwalkan pemeriksaan pada siklus terdekat.",
     ),
     "LOW": (
         "LOW",
         "MONITOR",
-        "Risiko kerusakan rendah. Cukup dipantau. Risiko scrap belum bisa "
-        "dinilai untuk PART ini.",
+        "Risiko kerusakan rendah. Cukup dipantau.",
     ),
 }
 
-PRIORITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+PRIORITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 
 
-def recommend(failure_risk_level: str, scrap_risk_level: str | None = None) -> dict:
+def recommend(failure_risk_level: str) -> dict:
     if failure_risk_level not in RISK_LEVELS:
         raise ValueError(f"Kelompok risiko kerusakan tidak dikenal: {failure_risk_level!r}")
 
-    if scrap_risk_level is None:
-        priority, action, message = _FAILURE_ONLY[failure_risk_level]
-    else:
-        if scrap_risk_level not in RISK_LEVELS:
-            raise ValueError(f"Kelompok risiko scrap tidak dikenal: {scrap_risk_level!r}")
-        priority, action, message = _DECISION_TABLE[
-            (failure_risk_level, scrap_risk_level)
-        ]
+    priority, action, message = _RECOMMENDATION_TABLE[failure_risk_level]
 
     return {
         "priority": priority,
@@ -179,16 +121,8 @@ def recommend(failure_risk_level: str, scrap_risk_level: str | None = None) -> d
         "message": message,
         "based_on": {
             "failure_risk_level": failure_risk_level,
-            "scrap_risk_level": scrap_risk_level,
         },
     }
-
-
-def is_replacement_candidate(failure_risk_level: str, scrap_risk_level: str | None) -> bool:
-    return (
-        failure_risk_level in ("MEDIUM", "HIGH")
-        and scrap_risk_level == "HIGH"
-    )
 
 
 DISCLAIMER = (
@@ -338,44 +272,18 @@ def failure_metadata() -> dict:
         raise ModelUnavailable(str(error)) from error
 
 
-def scrap_metadata() -> dict:
-    try:
-        return predict.load_scrap_model()[2]
-    except FileNotFoundError as error:
-        raise ModelUnavailable(str(error)) from error
-
-
 def versions() -> dict[str, str]:
     return {
         "failure": failure_metadata()["model_version"],
-        "scrap": scrap_metadata()["model_version"],
     }
-
-
-def survival_metadata() -> dict | None:
-
-    path = predict_survival.ARTIFACTS_DIR / "metadata.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def warmup() -> None:
     failure_metadata()
-    scrap_metadata()
 
 
 def describe() -> dict:
     failure = failure_metadata()
-    scrap = scrap_metadata()
-    survival = survival_metadata()
-    survival_split_metrics = None
-    if survival is not None:
-        per_model = survival["evaluation_metrics_full_landmark_rows"][survival["primary_model"]]
-        survival_split_metrics = {
-            "validation_metrics": per_model["validation"],
-            "test_metrics": per_model["test"],
-        }
     return {
         "failure": {
             "model_version": failure["model_version"],
@@ -388,37 +296,10 @@ def describe() -> dict:
             "test_metrics": failure["evaluation_metrics"]["test"],
             "data_through": failure["training_period"]["dataset_max_event_on"],
         },
-        "scrap": {
-            "model_version": scrap["model_version"],
-            "training_date": scrap["training_date"],
-            "target": scrap["target"],
-            "selected_model": scrap["selected_model"],
-            "features": scrap["features"],
-            "risk_cutoffs": scrap["risk_cutoffs"],
-            "cutoff_basis": scrap["cutoff_basis"],
-            "known_item_types": scrap["known_item_types"],
-            "data_through": scrap["training_period"]["onset_to"],
-            "training_rows": scrap["rows"],
-        },
-        "survival": (
-            {
-                "primary_model": survival["primary_model"],
-                "training_date": survival["training_date"],
-                "data_through": survival["data_end"],
-                "calibration_horizons_days": survival["calibration"]["horizons_days"],
-
-                **survival_split_metrics,
-            }
-            if survival is not None else None
-        ),
         "notes": {
             "failure_probability": (
                 "Peluang PART mengalami kerusakan dalam N hari ke depan. "
                 "Model tidak memperkirakan tanggal kerusakan."
-            ),
-            "scrap_probability": (
-                "Bersyarat: peluang PART tidak bisa diperbaiki JIKA rusak - "
-                "bukan peluang PART ini rusak."
             ),
         },
     }
@@ -459,15 +340,6 @@ def predict_failure(item_id: str) -> dict:
             raise _translate(item_id, error) from error
 
 
-def predict_scrap(item_id: str) -> dict:
-    with serving_batch.request_scope():
-        serving_batch.current_data_end()
-        try:
-            return _guard(predict.predict_scrap, item_id)
-        except predict.ScrapNotScorable as error:
-            raise _translate(item_id, error) from error
-
-
 def resolve_alert(item_id: str) -> dict:
     """Tandai alert PART ini selesai diinspeksi/dimaintenance.
 
@@ -481,96 +353,19 @@ def resolve_alert(item_id: str) -> dict:
     return {"item_id": item_id, "status": "RESOLVED"}
 
 
-def _survival_advisory_fields(item_id: str) -> dict:
-    empty_risk = {f"survival_risk_{h}d": None for h in predict_survival.HORIZONS_DAYS}
-    try:
-        result = predict_survival.predict(item_id)
-    except predict_survival.ItemNotScorable as error:
-        return {
-            "median_days_to_failure": None,
-            "median_days_to_failure_basis": f"model survival: {error}",
-            "days_until_survival_90pct": None,
-            "days_until_risk_medium": None,
-            "days_until_risk_high": None,
-            "survival_curve": None,
-            "curve_step_days": None,
-            "curve_horizon_days": None,
-            "curve_is_calibrated": False,
-            **empty_risk,
-            "survival_risk_is_calibrated": False,
-        }
-    except (Exception, SystemExit) as error:  # noqa: BLE001
-        return {
-            "median_days_to_failure": None,
-            "median_days_to_failure_basis": f"model survival tidak tersedia ({error})",
-            "days_until_survival_90pct": None,
-            "days_until_risk_medium": None,
-            "days_until_risk_high": None,
-            "survival_curve": None,
-            "curve_step_days": None,
-            "curve_horizon_days": None,
-            "curve_is_calibrated": False,
-            **empty_risk,
-            "survival_risk_is_calibrated": False,
-        }
-    curve = result["estimated_survival_curve_from_now"]
-    calibrated_risk = {
-        f"survival_risk_{h}d": result.get(f"calibrated_risk_{h}d")
-        for h in predict_survival.HORIZONS_DAYS
-    }
-    return {
-        "median_days_to_failure": result["median_days_remaining_from_now"],
-        "median_days_to_failure_basis": (
-            None if result["median_days_remaining_from_now"] is not None
-            else "S(t) belum turun sampai separuh dalam rentang follow-up training - tidak diekstrapolasi"
-        ),
-        "days_until_survival_90pct": result["days_until_survival_90pct_from_now"],
-        "days_until_risk_medium": result["days_until_risk_medium_from_now"],
-        "days_until_risk_high": result["days_until_risk_high_from_now"],
-        "survival_curve": curve,
-        "curve_step_days": predict_survival.CURVE_STEP_DAYS,
-        "curve_horizon_days": curve[-1]["days_from_now"] if curve else None,
-        "curve_is_calibrated": result["curve_is_calibrated"],
-        **calibrated_risk,
-        "survival_risk_is_calibrated": any(v is not None for v in calibrated_risk.values()),
-    }
-
-
 def get_part_assessment(item_id: str, include_explanation: bool = True) -> dict:
     with serving_batch.request_scope():
         serving_batch.current_data_end()
         failure = predict_failure(item_id)
-        failure.update(_survival_advisory_fields(item_id))
 
-        try:
-            scrap = predict_scrap(item_id)
-        except PartNotScorable:
-            scrap = None
-
-        scrap_level = scrap["scrap_risk_level"] if scrap else None
-        horizon = config.TARGET_HORIZON_DAYS
         assessment = {
             "item_id": failure["item_id"],
             "status": "SCORED",
             "as_of": failure["as_of"],
             "failure": failure,
-            "scrap": scrap,
-            f"death_probability_{horizon}d": (
-                predict.death_probability(
-                    failure[f"failure_probability_{horizon}d"], scrap["scrap_probability"]
-                )
-                if scrap
-                else None
-            ),
-            "recommendation": recommend(
-                failure["risk_level"], scrap_level
-            ),
-            "replacement_candidate": is_replacement_candidate(
-                failure["risk_level"], scrap_level
-            ),
+            "recommendation": recommend(failure["risk_level"]),
             "model_version": {
                 "failure": failure["model_version"],
-                "scrap": scrap["model_version"] if scrap else None,
             },
         }
 

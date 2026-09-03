@@ -38,7 +38,6 @@ from partrisk.api.schemas import (
     OverviewResponse,
     RecommendationListResponse,
     ResolveAlertResponse,
-    ScrapResponse,
     TerminalListResponse,
 )
 
@@ -178,7 +177,7 @@ def health(check_database: bool = False) -> dict:
         versions: dict[str, str | None] = dict(serving.versions())
         model_ok = True
     except ModelUnavailable:
-        versions = {"failure": None, "scrap": None}
+        versions = {"failure": None}
         model_ok = False
 
     database = "unchecked"
@@ -212,10 +211,10 @@ model_info_router = APIRouter(prefix="/api/v1", tags=["model"])
 
 @model_info_router.get("/model")
 def model_info() -> dict:
-    """Versi, target, fitur, ambang risiko, dan metrik uji kedua model.
+    """Versi, target, fitur, ambang risiko, dan metrik uji model kerusakan.
 
-    Seluruhnya dibaca dari metadata.json yang ditulis train.py /
-    train_scrap.py - tidak ada angka yang dihitung ulang di sini.
+    Seluruhnya dibaca dari metadata.json yang ditulis train.py - tidak ada
+    angka yang dihitung ulang di sini.
     """
     return serving.describe()
 
@@ -248,19 +247,6 @@ def failure(item_id: str = _ITEM_ID) -> dict:
     except PartNotScorable as error:
         return _not_scorable(error)
     return {"item_id": prediction["item_id"], "status": "SCORED", "failure": prediction}
-
-
-@prediction_router.get("/{item_id}/scrap", response_model=ScrapResponse)
-def scrap(item_id: str = _ITEM_ID) -> dict:
-    """Kalau PART ini rusak, peluang tidak bisa diperbaiki.
-
-    BERSYARAT terhadap kerusakan - bukan peluang PART ini rusak.
-    """
-    try:
-        prediction = serving.predict_scrap(item_id)
-    except PartNotScorable as error:
-        return _not_scorable(error)
-    return {"item_id": prediction["item_id"], "status": "SCORED", "scrap": prediction}
 
 
 @prediction_router.get("/{item_id}/history", response_model=HistoryResponse)
@@ -297,7 +283,7 @@ def assessment(
         ),
     ),
 ) -> dict:
-    """Gabungan risiko kerusakan + risiko scrap + rekomendasi tindakan."""
+    """Risiko kerusakan + rekomendasi tindakan."""
     try:
         return serving.get_part_assessment(item_id, include_explanation=explain)
     except PartNotScorable as error:
@@ -320,7 +306,7 @@ def _rows(frame: pd.DataFrame) -> list[dict]:
 @recommendations_router.get("/recommendations", response_model=RecommendationListResponse)
 def recommendations(
     risk: str | None = Query(None, description="Saring kelompok risiko kerusakan: LOW/MEDIUM/HIGH"),
-    priority: str | None = Query(None, description="Saring prioritas: LOW/MEDIUM/HIGH/CRITICAL"),
+    priority: str | None = Query(None, description="Saring prioritas: LOW/MEDIUM/HIGH"),
     item_type: str | None = Query(None, description="Saring jenis PART, mis. MOTOR"),
     client: str | None = Query(None, description="Saring client"),
     location: str | None = Query(None, description="Saring lokasi terakhir tercatat"),
@@ -329,13 +315,6 @@ def recommendations(
     ),
     search: str | None = Query(
         None, description="Cari sebagian ID PART, mis. 0112011 (tidak harus lengkap)"
-    ),
-    replacement_candidates_only: bool = Query(
-        False,
-        description=(
-            "Hanya PART dengan risiko kerusakan MEDIUM/HIGH sekaligus risiko "
-            "scrap HIGH - kandidat perencanaan penggantian."
-        ),
     ),
     official_queue_only: bool = Query(
         True,
@@ -361,7 +340,6 @@ def recommendations(
         location=location,
         terminal_id=terminal_id,
         search=search,
-        replacement_candidates_only=replacement_candidates_only,
         official_queue_only=official_queue_only,
     )
     page = selected.iloc[offset : offset + limit]
@@ -479,7 +457,7 @@ monitoring_router = APIRouter(prefix="/api/v1/monitoring", tags=["monitoring"])
 
 @monitoring_router.get("/metrics")
 def metrics() -> dict:
-    """Snapshot metrik monitoring untuk kedua model."""
+    """Snapshot metrik monitoring model kerusakan."""
     return monitoring_service.summary()
 
 
@@ -488,20 +466,13 @@ def failure_metrics() -> dict:
     return monitoring_service.failure_monitoring()
 
 
-@monitoring_router.get("/metrics/scrap")
-def scrap_metrics() -> dict:
-    return monitoring_service.scrap_monitoring()
-
-
 DESCRIPTION = """
-API risiko kerusakan dan risiko scrap untuk PART.
+API risiko kerusakan untuk PART.
 
 **Yang perlu diketahui saat membaca angkanya**
 
 - `failure_probability_Nd` adalah PELUANG PART rusak dalam N hari ke depan.
   Model tidak memperkirakan tanggal kerusakan.
-- `scrap_probability` BERSYARAT: peluang PART tidak bisa diperbaiki JIKA
-  rusak - bukan peluang PART ini rusak.
 - Kelompok risiko (LOW/MEDIUM/HIGH) memakai ambang yang ditetapkan saat
   training dari kapasitas kerja tim, bukan angka bulat yang dikarang.
 """
