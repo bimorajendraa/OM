@@ -520,7 +520,6 @@ PAGES = [
     DASHBOARD_DIR / "pages" / "2_Part_Detail.py",
     DASHBOARD_DIR / "pages" / "3_Inspeksi.py",
     DASHBOARD_DIR / "pages" / "5_Terminal.py",
-    DASHBOARD_DIR / "pages" / "6_Sistem.py",
 ]
 
 
@@ -559,7 +558,6 @@ def route_dashboard_to_testclient(monkeypatch, client):
     api_client.recommendations.clear()
     api_client.assessment.clear()
     api_client.history.clear()
-    api_client.model_info.clear()
     api_client.terminals.clear()
     api_client.terminal_parts.clear()
     api_client.terminal_part_items.clear()

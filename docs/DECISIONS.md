@@ -1006,4 +1006,97 @@ lagi utuh di Milestone 5 (persistent alert).
 TERBUKA, bukan ditutup - kalau/ketika dibutuhkan lagi, revisit sebagai
 bagian Milestone 7 (Production Hardening), bukan dibangun ulang sekarang.
 
+**Update 2026-09-03 (lanjutan sesi)**: setelah §24 di atas menyisakan
+halaman "Sistem" cuma menampilkan versi model (isi monitoring-nya sudah
+kosong), user minta dihapus juga - `dashboard/pages/6_Sistem.py` dihapus
+total. `GET /api/v1/model` (`serving.describe()`) TETAP ADA sebagai
+endpoint API publik (bukan "monitoring", murni metadata versi model - field
+`gate` ditambahkan langsung ke situ, lihat WHY di `serving/single.py::
+describe()`), tapi `api_client.py::model_info()` dihapus karena tidak ada
+lagi halaman dashboard yang memanggilnya.
+
+---
+
+## 25 · Item -> Installation Cycle -> Intervention (Milestone 4)
+
+**Status**: berlaku, 2026-09-03. `migrations/predictive/0002_lifecycle.sql`.
+
+**Desain inti**: `predictive.item_cycle` BUKAN sumber kebenaran siklus fisik
+sendiri - itu tetap `core.data_reader.get_cycles()` (data operasional,
+sudah lama dipakai untuk fitur training/serving Q2). `item_cycle` murni
+CERMIN dari situ, disinkron on-demand per item (`predictive/cycles.py::
+sync_item_cycles()`), supaya `intervention` (dan `alert` di Milestone 5)
+punya foreign key stabil untuk ditempel tanpa perlu query silang ke data
+operasional tiap kali. `cycle_id` REUSE `installation_cycle_id` operasional
+apa adanya (format `"<item_id>:<urutan>"`) - bukan ID baru yang diciptakan
+di predictive DB, menghindari kelas bug "dua sumber kebenaran untuk hal
+yang sama" (persis alasan `docs/METHODOLOGY.md` `data_reader._recon_context()`
+disebut di `cli.py` sebagai pelajaran masa lalu).
+
+**Kenapa on-demand per item, bukan sinkron massal**: sistem ini murni
+reaktif terhadap tindakan teknisi/aplikasi eksternal (intervention) - tidak
+ada kebutuhan riil untuk tahu status cycle SEMUA item setiap saat sebelum
+ada yang benar-benar menyentuhnya. Sinkron massal berkala bisa ditambah
+nanti (Milestone 7) kalau ada konsumen nyata yang butuh (mis. dashboard
+Terminal->Part->Item versi lifecycle) - belum dibangun sekarang, hindari
+overengineering.
+
+**Minor repair tidak membuka cycle baru** (docs §10 master prompt):
+`predictive/interventions.py::record_intervention()` SELALU menempel ke
+cycle AKTIF item saat dipanggil (`ensure_active_cycle()`) - intervention_seq
+naik DALAM cycle itu. Cycle baru HANYA bisa terjadi lewat perubahan data
+operasional (install ulang tercatat di sana), tidak pernah lewat klaim
+`type=DISMANTLE` dari intervention - `type` di situ murni LABEL tindakan
+yang dilaporkan, tidak (dan tidak boleh) memicu efek samping ke `item_cycle`.
+Ini sengaja: kalau ternyata sebuah DISMANTLE tercatat di intervention tapi
+BELUM tercatat di data operasional, `item_cycle` tidak boleh "mengaku"
+cycle sudah berakhir padahal sumber kebenarannya belum bilang begitu.
+
+**Idempotency & concurrency**: `UNIQUE(external_system, external_event_id)`
+(partial, hanya kalau keduanya terisi) - lihat docs §23. Race dua
+intervention untuk cycle yang sama dihindari dengan `SELECT ... FOR UPDATE`
+pada baris `item_cycle`-nya sebelum menghitung `intervention_seq`
+berikutnya (serialize lewat row lock, bukan retry-on-conflict) - throughput
+rendah (satu teknisi, satu waktu, per PART) jadi trade-off blocking singkat
+ini lebih sederhana daripada retry logic.
+
+**Jenis intervention** (`config.INTERVENTION_TYPES`) divalidasi di
+Python, BUKAN `CHECK` constraint database - menambah jenis baru cukup ubah
+satu konstanta, tidak perlu migrasi (docs §11 master prompt: "jangan
+hardcode... kalau domain table/enum lebih tepat", dipilih app-level list
+di sini karena extensibility lebih penting daripada validasi DB-level untuk
+kolom yang murni label operasional, bukan foreign key). **SUPERSEDED
+sesaat kemudian, lihat update di bawah** - dipertahankan apa adanya sesuai
+konvensi append-only dokumen ini.
+
+**Update 2026-09-03 (lanjutan sesi) - klasifikasi jenis intervention
+DIHAPUS**: permintaan eksplisit user - "tidak usah ada intervention type,
+intinya kalau ngepost artinya ada perbaikan". Kolom `type` dan
+`config.INTERVENTION_TYPES` dihapus total (migrasi `0002_lifecycle.sql`
+diedit langsung, BUKAN migrasi baru yang membatalkan sebagian - tabel masih
+kosong/belum pernah dipakai produksi saat perubahan ini terjadi, jadi tidak
+melanggar aturan "jangan edit migrasi lama" di `docs/DATABASE.md`, yang
+berlaku untuk migrasi yang SUDAH berjalan di production). `outcome`/
+`action_code`/`remark` TETAP ADA sebagai detail bebas isi - yang dihapus
+murni kategori terkontrolnya, bukan kemampuan mencatat detail. Satu baris
+`predictive.intervention` sekarang cukup berarti "satu perbaikan terjadi",
+tanpa perlu memilih kategori.
+
+**Belum dikerjakan** (Milestone 5, di luar scope pass ini): `alert_id` di
+`intervention` masih nullable tanpa FK (tabel `alert` belum ada); endpoint
+`POST /api/v1/alerts/{alert_id}/interventions` BELUM dibuat - `predictive/
+interventions.py::record_intervention()` baru lapisan Python/DB, belum
+diekspos lewat API. Lihat catatan user: endpoint publik yang dibutuhkan
+nanti HANYA POST (aplikasi eksternal baca terminal/part/item/alert langsung
+dari database, bukan lewat GET API) - jadi endpoint intervention akan
+dibangun di Milestone 5 sekali jalan bersama alert, bukan endpoint terpisah
+sekarang yang harus diubah lagi nanti.
+
+**Verifikasi**: test end-to-end nyata terhadap database - item dengan 11
+cycle historis tersinkron benar (10 non-aktif dengan `end_reason` asli dari
+data operasional, 1 aktif), dua intervention berturut-turut pada item yang
+sama menghasilkan `intervention_seq` 0 lalu 1 DALAM `cycle_id` yang sama,
+retry dengan `external_event_id` yang sama mengembalikan baris pertama
+(bukan baris baru) - lihat `tests/test_predictive.py`.
+
 ---

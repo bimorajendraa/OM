@@ -174,7 +174,9 @@ src/partrisk/
 │   └── alerts.py                alert lifecycle (dedup, resolve-alert), tanpa persistence
 ├── predictive/
 │   ├── db.py                   koneksi tulis schema `predictive` + migration runner
-│   └── scoring.py               model_run + item_prediction (append-only) - `score-and-persist`
+│   ├── scoring.py               model_run + item_prediction (append-only) - `score-and-persist`
+│   ├── cycles.py                 sinkron item_cycle dari data operasional (on-demand per item)
+│   └── interventions.py          catat tindakan teknisi - intervention_seq DALAM cycle aktif
 ├── api/
 │   ├── app.py                  FastAPI: app, routes, db pool, settings, logging
 │   └── schemas.py               bentuk request/response API

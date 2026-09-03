@@ -40,23 +40,71 @@ Idempotent (`CREATE ... IF NOT EXISTS`) - aman dijalankan ulang. File baru
 ditambahkan sebagai `migrations/predictive/000N_*.sql` bernomor urut,
 jangan mengedit file lama yang sudah pernah dijalankan di production.
 
-## Tabel (Milestone 2 - baru `model_run` + `item_prediction`)
+## Tabel
 
 ```
-predictive.model_run
+predictive.model_run                                            -- Milestone 2
   run_id, model_version, feature_version, started_at, completed_at,
   status (RUNNING/SUCCEEDED/FAILED), row_count, error_message
 
 predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
   prediction_id, run_id -> model_run,
   terminal_id, part_type, item_id,
-  cycle_id, intervention_seq        -- NULL sampai Milestone 4 (lifecycle)
+  cycle_id, intervention_seq        -- NULL sampai intervensi tercatat untuk item itu
   p30, p60, p90, p120, risk_level, gate_flagged,
   scored_at, model_version, feature_version
+
+predictive.item_cycle                                            -- Milestone 4
+  cycle_id (PK, REUSE installation_cycle_id operasional apa adanya,
+            format "<item_id>:<urutan>" - lihat predictive/cycles.py)
+  item_id, cycle_no, started_at, ended_at,
+  start_reason, end_reason (NULL selama masih aktif),
+  is_active (partial unique index: satu item, satu cycle aktif), synced_at
+
+predictive.intervention                                          -- Milestone 4, APPEND-ONLY
+  intervention_id, item_id, cycle_id -> item_cycle, intervention_seq (UNIK per cycle),
+  alert_id (nullable - FK ditambahkan Milestone 5, tabel alert belum ada),
+  outcome, action_code, remark   -- bebas isi, TIDAK ADA kolom klasifikasi
+                                  -- jenis (type) - satu baris = satu perbaikan
+                                  -- terjadi, apa pun bentuknya (§25 update)
+  external_system, external_work_order_id, external_inspection_id, external_event_id,
+  performed_at, created_at
+  UNIQUE(cycle_id, intervention_seq); partial UNIQUE(external_system, external_event_id)
+  untuk idempotency (docs §23) - hanya kalau keduanya terisi.
+
+predictive.alert, predictive.alert_event   -- menyusul Milestone 5, belum ada di schema.
 ```
 
-Tabel `item_cycle`, `intervention`, `alert`, `alert_event` menyusul di
-migrasi Milestone 4/5 - belum ada di schema saat ini.
+### `item_cycle` - mencerminkan data operasional, bukan mencatat sendiri
+
+`item_cycle` BUKAN sumber kebenaran siklus fisik - itu tetap data operasional
+(`core.data_reader.get_cycles()`, dibangun dari event install/dismantle/
+return/failure). `predictive/cycles.py::sync_item_cycles(item_id)` menyalin
+riwayat cycle satu item dari sana ke `predictive.item_cycle`
+(`ON CONFLICT ... DO UPDATE`, idempotent), murni supaya `intervention`/
+`alert` (Milestone 5) punya foreign key yang stabil untuk ditempel - operasi
+tulis TIDAK PERNAH mengubah kapan/kenapa sebuah cycle berakhir, itu selalu
+ikut apa yang sudah tercatat di data operasional.
+
+Disinkron **on-demand per item** (dipanggil dari `ensure_active_cycle()`
+sebelum mencatat intervention), BUKAN disinkron massal untuk seluruh armada -
+baris `item_cycle` hanya ada untuk item yang benar-benar disentuh sistem ini.
+
+`RIGHT_CENSORED_AT_DATA_END` (artinya "belum ada event penutup sampai batas
+data operasional terakhir", BUKAN penutupan fisik) tidak pernah ditulis
+sebagai `end_reason` - kalau itu status cycle-nya, `item_cycle` tetap
+`is_active=true`, `ended_at`/`end_reason` tetap NULL. `end_reason` yang
+tersimpan selalu kejadian fisik nyata (FAILURE/RETURNED/DISMANTLED).
+
+### `intervention` - minor repair tidak membuka cycle baru
+
+`predictive/interventions.py::record_intervention(item_id, type, ...)`
+selalu mencatat ke cycle AKTIF item saat ini (`ensure_active_cycle()`),
+menaikkan `intervention_seq` DALAM cycle itu - TIDAK PERNAH membuka cycle
+baru sendiri (itu murni konsekuensi data operasional lewat sync di atas).
+Baris `item_cycle` yang jadi target intervention dikunci (`SELECT ... FOR
+UPDATE`) selama penghitungan `intervention_seq` berikutnya, supaya dua
+intervention untuk cycle yang sama tidak bisa saling tabrak nomor urut.
 
 ## Menulis prediksi (scheduled scoring)
 

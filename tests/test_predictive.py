@@ -3,9 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from partrisk.predictive import cycles as cycle_store
 from partrisk.predictive import db as predictive_db
+from partrisk.predictive import interventions
 from partrisk.predictive import scoring
-from tests.conftest import needs_database
+from tests.conftest import needs_database, needs_models
 
 
 @pytest.fixture
@@ -119,3 +121,128 @@ def test_record_predictions_append_only_tidak_menimpa_baris_lama(cleanup_run_ids
             )
             count = cur.fetchone()[0]
     assert count == 2, "dua kali record_predictions harus menghasilkan dua baris (append-only), bukan menimpa"
+
+
+@pytest.fixture
+def cleanup_item_lifecycle():
+    touched_items: list[str] = []
+    yield touched_items
+    if not touched_items:
+        return
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM predictive.intervention WHERE item_id = ANY(%s)", (touched_items,)
+            )
+            cur.execute(
+                "DELETE FROM predictive.item_cycle WHERE item_id = ANY(%s)", (touched_items,)
+            )
+        conn.commit()
+
+
+@needs_database
+@needs_models
+def test_ensure_active_cycle_sinkron_dari_data_operasional(scorable_item, cleanup_item_lifecycle):
+    cleanup_item_lifecycle.append(scorable_item)
+
+    cycle = cycle_store.ensure_active_cycle(scorable_item)
+
+    assert cycle["item_id"] == scorable_item
+    assert cycle["is_active"] is True
+    assert cycle["cycle_id"].startswith(scorable_item)
+
+
+@needs_database
+@needs_models
+def test_ensure_active_cycle_idempotent(scorable_item, cleanup_item_lifecycle):
+    """Sinkron dua kali TIDAK boleh menggandakan baris (upsert per cycle_id,
+    bukan insert polos) - item boleh punya banyak cycle historis, tapi
+    jumlah barisnya harus tetap sama lintas panggilan berulang, dan hanya
+    satu yang aktif."""
+    cleanup_item_lifecycle.append(scorable_item)
+
+    first = cycle_store.ensure_active_cycle(scorable_item)
+    second = cycle_store.ensure_active_cycle(scorable_item)
+
+    assert first["cycle_id"] == second["cycle_id"]
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*), count(*) FILTER (WHERE is_active) "
+                "FROM predictive.item_cycle WHERE item_id = %s",
+                (scorable_item,),
+            )
+            total_after_first, active_after_first = cur.fetchone()
+
+    cycle_store.ensure_active_cycle(scorable_item)
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*), count(*) FILTER (WHERE is_active) "
+                "FROM predictive.item_cycle WHERE item_id = %s",
+                (scorable_item,),
+            )
+            total_after_second, active_after_second = cur.fetchone()
+
+    assert active_after_first == 1
+    assert total_after_second == total_after_first, (
+        "sinkron ulang tidak boleh menggandakan baris cycle yang sudah ada"
+    )
+    assert active_after_second == 1
+
+
+@needs_database
+def test_ensure_active_cycle_item_tidak_dikenal_ditolak():
+    with pytest.raises(cycle_store.ItemNotInstalled):
+        cycle_store.ensure_active_cycle("ITEM-TIDAK-PERNAH-ADA-XYZ")
+
+
+@needs_database
+@needs_models
+def test_record_intervention_menaikkan_seq_dalam_cycle_yang_sama(
+    scorable_item, cleanup_item_lifecycle
+):
+    cleanup_item_lifecycle.append(scorable_item)
+    now = pd.Timestamp.now(tz="UTC")
+
+    first, created_first = interventions.record_intervention(
+        scorable_item, now, external_system="TEST", external_event_id="E1"
+    )
+    second, created_second = interventions.record_intervention(
+        scorable_item, now,
+        action_code="TIGHTENING", external_system="TEST", external_event_id="E2",
+    )
+
+    assert created_first is True and created_second is True
+    assert first["cycle_id"] == second["cycle_id"], (
+        "minor repair tidak boleh membuka cycle baru - harus dalam cycle aktif yang sama"
+    )
+    assert second["intervention_seq"] == first["intervention_seq"] + 1
+
+
+@needs_database
+@needs_models
+def test_record_intervention_idempotent_lewat_external_event_id(
+    scorable_item, cleanup_item_lifecycle
+):
+    cleanup_item_lifecycle.append(scorable_item)
+    now = pd.Timestamp.now(tz="UTC")
+
+    first, created_first = interventions.record_intervention(
+        scorable_item, now, external_system="TEST", external_event_id="DUPLICATE"
+    )
+    retry, created_retry = interventions.record_intervention(
+        scorable_item, now, external_system="TEST", external_event_id="DUPLICATE"
+    )
+
+    assert created_first is True
+    assert created_retry is False
+    assert retry["intervention_id"] == first["intervention_id"]
+
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM predictive.intervention "
+                "WHERE external_system = 'TEST' AND external_event_id = 'DUPLICATE'"
+            )
+            assert cur.fetchone()[0] == 1

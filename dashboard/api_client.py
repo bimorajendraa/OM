@@ -56,11 +56,6 @@ def health() -> dict:
     return _get("/health")
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def model_info() -> dict:
-    return _get("/api/v1/model")
-
-
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Menghitung risiko seluruh PART aktif...")
 def overview(top: int = 10) -> dict:
     return _get("/api/v1/overview", {"top": top})

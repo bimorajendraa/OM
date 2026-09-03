@@ -333,10 +333,6 @@ def sidebar_status() -> dict | None:
             "</div>",
             unsafe_allow_html=True,
         )
-        try:
-            st.page_link("pages/6_Sistem.py", label="Info sistem & model")
-        except KeyError:
-            st.markdown('<span class="system-link">Info sistem &amp; model</span>', unsafe_allow_html=True)
     return status
 
 
