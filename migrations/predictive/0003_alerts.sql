@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS predictive.alert (
 CREATE INDEX IF NOT EXISTS ix_alert_item ON predictive.alert (item_id);
 CREATE INDEX IF NOT EXISTS ix_alert_host_serial_code ON predictive.alert (host_serial_code);
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_one_open_per_episode
-    ON predictive.alert (item_id, host_serial_code, inspection_seq)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_one_open_per_item
+    ON predictive.alert (item_id)
     WHERE status = 'OPEN';
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_one_per_prediction

@@ -117,3 +117,47 @@ def test_inspection_endpoint_serial_code_tidak_ada_mengembalikan_404(client):
 def test_inspection_endpoint_tanpa_host_serial_code_ditolak(client):
     response = client.post("/api/v1/inspections", json={})
     assert response.status_code == 422
+
+
+def test_inspection_endpoint_menolak_field_typo(client):
+    """docs/DECISIONS.md §41 - extra="forbid" di InspectionRequest supaya
+    typo nama field (mis. external_event_idx) langsung 422, bukan diam-diam
+    diabaikan (extra="allow" lama akan menelan typo tanpa peringatan)."""
+    response = client.post(
+        "/api/v1/inspections",
+        json={"host_serial_code": "TIDAK-ADA", "external_event_idx": "WO-123"},
+    )
+    assert response.status_code == 422
+
+
+def test_inspection_endpoint_host_serial_code_historis_ditolak_409(client):
+    """Kasus 2 (level API) - host_serial_code yang benar-benar DIKENAL
+    (pernah tercatat di journal item ini) tapi BUKAN cycle aktif sekarang
+    ditolak 409 HOST_SERIAL_NOT_CURRENT, bukan diam-diam resolve cycle
+    aktif yang lain."""
+    from partrisk.core import data_reader
+
+    cycles = data_reader.get_cycles()
+    events = data_reader.get_events()
+    active = cycles.loc[
+        cycles["cycle_end_reason"].eq("RIGHT_CENSORED_AT_DATA_END")
+        & cycles["host_serial_code_clean"].notna()
+    ]
+    current_by_item = active.set_index("item_identifier_clean")["host_serial_code_clean"]
+
+    history = events.loc[events["host_serial_code_clean"].notna()]
+    codes_by_item = history.groupby("item_identifier_clean")["host_serial_code_clean"].unique()
+    for item_id, current in current_by_item.items():
+        codes = codes_by_item.get(item_id)
+        if codes is None:
+            continue
+        historis = [code for code in codes if code != current]
+        if historis:
+            response = client.post(
+                "/api/v1/inspections",
+                json={"host_serial_code": historis[0]},
+            )
+            assert response.status_code == 409
+            assert response.json()["status"] == "HOST_SERIAL_NOT_CURRENT"
+            return
+    pytest.skip("tidak ada item aktif dengan riwayat host_serial_code historis untuk diuji")

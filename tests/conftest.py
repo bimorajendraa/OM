@@ -70,3 +70,10 @@ def batch():
 @pytest.fixture(scope="session")
 def scorable_item(batch) -> str:
     return str(batch.frame["item_id"].iloc[0])
+
+
+@pytest.fixture(scope="session")
+def scorable_item_host_serial_code(scorable_item) -> str:
+    from partrisk.predictive import cycles as cycle_store
+
+    return cycle_store.ensure_active_cycle(scorable_item)["cycle_id"]

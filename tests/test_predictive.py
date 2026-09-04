@@ -63,6 +63,39 @@ def test_fail_run_menandai_gagal_dengan_pesan(cleanup_run_ids):
 
 
 @needs_database
+def test_valid_item_prediction_view_kecualikan_failed_run(cleanup_run_ids):
+    """docs/DECISIONS.md §41 - prediction dari model_run FAILED tidak boleh
+    dianggap valid/aktif. predictive.valid_item_prediction (JOIN model_run
+    WHERE status='SUCCEEDED') adalah cara aman konsumen eksternal membaca
+    'prediksi yang sah', bukan item_prediction mentah."""
+    succeeded_run = scoring.start_run("test-model-v0")
+    cleanup_run_ids.append(succeeded_run)
+    failed_run = scoring.start_run("test-model-v0")
+    cleanup_run_ids.append(failed_run)
+
+    frame = pd.DataFrame([_valid_prediction_row("TEST-VALID-VIEW-OK")])
+    scoring.record_predictions(succeeded_run, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+    scoring.complete_run(succeeded_run, row_count=1)
+
+    frame2 = pd.DataFrame([_valid_prediction_row("TEST-VALID-VIEW-FAILED")])
+    scoring.record_predictions(failed_run, frame2, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+    scoring.fail_run(failed_run, "sengaja digagalkan untuk test")
+
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT host_serial_code FROM predictive.valid_item_prediction WHERE run_id = ANY(%s)",
+                ([succeeded_run, failed_run],),
+            )
+            visible = {row[0] for row in cur.fetchall()}
+
+    assert "0000000-TEST-VALID-VIEW-OK-00" in visible, "prediction dari SUCCEEDED run harus valid"
+    assert "0000000-TEST-VALID-VIEW-FAILED-00" not in visible, (
+        "prediction dari FAILED run tidak boleh muncul sebagai prediction valid/aktif"
+    )
+
+
+@needs_database
 def test_record_predictions_menulis_baris_sesuai_frame(cleanup_run_ids):
     run_id = scoring.start_run("test-model-v0")
     cleanup_run_ids.append(run_id)
@@ -155,6 +188,37 @@ def test_record_predictions_menolak_probabilitas_nan():
     frame = pd.DataFrame([row])
     with pytest.raises(RuntimeError, match="NaN"):
         scoring.record_predictions(1, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+
+
+def test_record_predictions_menolak_host_serial_code_kosong():
+    row = _valid_prediction_row()
+    row["host_serial_code"] = None
+    frame = pd.DataFrame([row])
+    with pytest.raises(RuntimeError, match="host_serial_code"):
+        scoring.record_predictions(1, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+
+
+@needs_database
+def test_db_menolak_host_serial_code_null_di_item_prediction(cleanup_run_ids):
+    """docs/DECISIONS.md §41 - kontrak host_serial_code NOT NULL ditegakkan
+    DUA lapis: guard Python (test di atas) DAN constraint database - kalau
+    guard Python suatu saat dilewati/bug, database tetap menolak."""
+    run_id = scoring.start_run("test-model-v0")
+    cleanup_run_ids.append(run_id)
+
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            with pytest.raises(Exception, match="host_serial_code|not-null|null value"):
+                cur.execute(
+                    """
+                    INSERT INTO predictive.item_prediction
+                        (run_id, host_serial_code, p30, p60, p90, p120, risk_level,
+                         gate_flagged, scored_at, model_version)
+                    VALUES (%s, NULL, 0.1, 0.1, 0.1, 0.1, 'LOW', FALSE, now(), 'test-model-v0')
+                    """,
+                    (run_id,),
+                )
+        conn.rollback()
 
 
 @needs_database
@@ -471,6 +535,36 @@ def _insert_open_alert(item_id: str, host_serial_code: str) -> int:
 
 
 @needs_database
+def test_db_menolak_dua_open_alert_untuk_item_id_yang_sama(cleanup_alert_ids):
+    """docs/DECISIONS.md §41 - satu physical item maksimal satu actionable
+    OPEN alert, ditegakkan constraint database (ux_alert_one_open_per_item),
+    BUKAN cuma logic aplikasi - dites dengan DUA host_serial_code BERBEDA
+    (simulasi old cycle vs current cycle) untuk item_id yang SAMA."""
+    fake_item = "TEST-DUPLICATE-OPEN-ITEM"
+    alert_id = _insert_open_alert(fake_item, f"{fake_item}-OLD-CYCLE")
+    cleanup_alert_ids.append(alert_id)
+
+    with pytest.raises(Exception, match="ux_alert_one_open_per_item|duplicate key"):
+        _insert_open_alert(fake_item, f"{fake_item}-NEW-CYCLE")
+
+
+@needs_database
+def test_db_mengizinkan_dua_item_berbeda_masing_masing_open_alert(cleanup_alert_ids):
+    """Kasus 4 - dua item_id BERBEDA tetap boleh masing-masing punya OPEN
+    alert secara bersamaan; constraint hanya berlaku PER item_id."""
+    alert_id_a = _insert_open_alert("TEST-ITEM-A-DISTINCT", "TEST-ITEM-A-DISTINCT-00")
+    cleanup_alert_ids.append(alert_id_a)
+    alert_id_b = _insert_open_alert("TEST-ITEM-B-DISTINCT", "TEST-ITEM-B-DISTINCT-00")
+    cleanup_alert_ids.append(alert_id_b)
+
+    assert alert_id_a != alert_id_b
+    alert_a = alert_engine.get_alert(alert_id_a)
+    alert_b = alert_engine.get_alert(alert_id_b)
+    assert alert_a["status"] == "OPEN"
+    assert alert_b["status"] == "OPEN"
+
+
+@needs_database
 def test_auto_resolve_closed_cycles_menutup_alert_pada_cycle_yang_sudah_berakhir(
     closed_cycle, cleanup_alert_ids
 ):
@@ -529,13 +623,17 @@ def test_resolve_item_by_host_serial_code_tidak_ditemukan():
 
 @needs_database
 @needs_models
-def test_resolve_by_item_dengan_alert_open_meresolve_alert(scorable_item, cleanup_alert_lifecycle):
+def test_resolve_by_item_dengan_alert_open_meresolve_alert(
+    scorable_item, scorable_item_host_serial_code, cleanup_alert_lifecycle
+):
     cleanup_alert_lifecycle.append(scorable_item)
     scored_at = pd.Timestamp.now(tz="UTC")
     opened_ids = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
     assert len(opened_ids) == 1
 
-    result = alert_engine.resolve_by_item(scorable_item, pd.Timestamp.now(tz="UTC"))
+    result = alert_engine.resolve_by_item(
+        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC")
+    )
 
     assert result["alert"] is not None
     assert result["alert"]["alert_id"] == opened_ids[0]
@@ -545,14 +643,16 @@ def test_resolve_by_item_dengan_alert_open_meresolve_alert(scorable_item, cleanu
 
 @needs_database
 def test_resolve_by_item_tanpa_alert_open_tetap_mencatat_inspection(
-    scorable_item, cleanup_item_lifecycle
+    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
 ):
     """docs/DECISIONS.md §25/§28: satu POST tetap berarti ada perbaikan
     walau item ini tidak sedang punya alert OPEN - inspection tetap
     dicatat, cuma tidak ada alert yang ikut ditutup."""
     cleanup_item_lifecycle.append(scorable_item)
 
-    result = alert_engine.resolve_by_item(scorable_item, pd.Timestamp.now(tz="UTC"))
+    result = alert_engine.resolve_by_item(
+        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC")
+    )
 
     assert result["alert"] is None
     assert result["inspection"]["item_id"] == scorable_item
@@ -562,7 +662,7 @@ def test_resolve_by_item_tanpa_alert_open_tetap_mencatat_inspection(
 @needs_database
 @needs_models
 def test_resolve_by_item_dengan_external_event_id_sama_tidak_duplikat(
-    scorable_item, cleanup_item_lifecycle
+    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
 ):
     """Retry aplikasi eksternal (mis. setelah timeout) memakai
     external_event_id yang sama - harus mengembalikan inspection yang SAMA,
@@ -571,10 +671,10 @@ def test_resolve_by_item_dengan_external_event_id_sama_tidak_duplikat(
     external_event_id = f"retry-test-{scorable_item}-{pd.Timestamp.now().value}"
 
     first = alert_engine.resolve_by_item(
-        scorable_item, pd.Timestamp.now(tz="UTC"), external_event_id
+        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC"), external_event_id
     )
     second = alert_engine.resolve_by_item(
-        scorable_item, pd.Timestamp.now(tz="UTC"), external_event_id
+        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC"), external_event_id
     )
 
     assert first["inspection"]["inspection_id"] == second["inspection"]["inspection_id"]
@@ -592,17 +692,75 @@ def test_resolve_by_item_dengan_external_event_id_sama_tidak_duplikat(
 @needs_database
 @needs_models
 def test_resolve_by_item_dengan_external_event_id_berbeda_tetap_dua_inspection(
-    scorable_item, cleanup_item_lifecycle
+    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
 ):
     """external_event_id BERBEDA berarti perbaikan BERBEDA - keduanya harus
     tercatat, idempotency tidak boleh menelan inspection yang sah."""
     cleanup_item_lifecycle.append(scorable_item)
 
     first = alert_engine.resolve_by_item(
-        scorable_item, pd.Timestamp.now(tz="UTC"), f"evt-a-{scorable_item}"
+        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC"), f"evt-a-{scorable_item}"
     )
     second = alert_engine.resolve_by_item(
-        scorable_item, pd.Timestamp.now(tz="UTC"), f"evt-b-{scorable_item}"
+        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC"), f"evt-b-{scorable_item}"
     )
 
     assert first["inspection"]["inspection_id"] != second["inspection"]["inspection_id"]
+
+
+@needs_database
+@needs_models
+def test_resolve_by_item_host_serial_code_current_berhasil(
+    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
+):
+    """Kasus 1 - host_serial_code CURRENT (cycle aktif) berhasil resolve."""
+    cleanup_item_lifecycle.append(scorable_item)
+
+    result = alert_engine.resolve_by_item(
+        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC")
+    )
+
+    assert result["inspection"]["item_id"] == scorable_item
+    assert result["inspection"]["host_serial_code"] == scorable_item_host_serial_code
+
+
+@needs_database
+@needs_models
+def test_resolve_by_item_host_serial_code_historis_ditolak(scorable_item):
+    """Kasus 2 - host_serial_code HISTORIS (bukan cycle aktif) ditolak
+    dengan HostSerialNotCurrent, BUKAN dipakai resolve cycle aktif."""
+    stale_host_serial_code = f"STALE-{scorable_item}-00"
+
+    with pytest.raises(alert_engine.HostSerialNotCurrent) as excinfo:
+        alert_engine.resolve_by_item(
+            scorable_item, stale_host_serial_code, pd.Timestamp.now(tz="UTC")
+        )
+
+    assert excinfo.value.given_host_serial_code == stale_host_serial_code
+    assert excinfo.value.item_id == scorable_item
+
+
+@needs_database
+@needs_models
+def test_resolve_by_item_host_serial_code_current_tidak_pengaruhi_item_lain(
+    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
+):
+    """Kasus 4 - resolve satu item dengan host_serial_code current TIDAK
+    memengaruhi item lain (item lain tidak ikut punya inspection baru)."""
+    cleanup_item_lifecycle.append(scorable_item)
+
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM predictive.inspection WHERE item_id != %s", (scorable_item,))
+            before = cur.fetchone()[0]
+
+    alert_engine.resolve_by_item(
+        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC")
+    )
+
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM predictive.inspection WHERE item_id != %s", (scorable_item,))
+            after = cur.fetchone()[0]
+
+    assert after == before, "resolve satu item tidak boleh membuat inspection untuk item lain"

@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS predictive.item_prediction (
     run_id BIGINT NOT NULL REFERENCES predictive.model_run (run_id),
 
     terminal_serial_code TEXT,
-    host_serial_code TEXT,
+    host_serial_code TEXT NOT NULL,
 
     p30 DOUBLE PRECISION NOT NULL,
     p60 DOUBLE PRECISION NOT NULL,
@@ -38,3 +38,9 @@ CREATE INDEX IF NOT EXISTS ix_item_prediction_terminal
     ON predictive.item_prediction (terminal_serial_code);
 CREATE INDEX IF NOT EXISTS ix_item_prediction_host_serial_code
     ON predictive.item_prediction (host_serial_code);
+
+CREATE OR REPLACE VIEW predictive.valid_item_prediction AS
+SELECT ip.*
+FROM predictive.item_prediction ip
+JOIN predictive.model_run mr ON mr.run_id = ip.run_id
+WHERE mr.status = 'SUCCEEDED';

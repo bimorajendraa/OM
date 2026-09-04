@@ -200,7 +200,7 @@ def record_inspection(payload: InspectionRequest) -> dict:
             message=f"PART dengan serial code '{payload.host_serial_code}' tidak ditemukan.",
         )
     result = alert_engine.resolve_by_item(
-        item_id, pd.Timestamp.now(tz="UTC"), payload.external_event_id
+        item_id, payload.host_serial_code, pd.Timestamp.now(tz="UTC"), payload.external_event_id
     )
     return {
         "inspection": _stringify_datetimes(result["inspection"]),
@@ -280,6 +280,16 @@ async def handle_alert_not_open(request: Request, error: alert_engine.AlertNotOp
     return JSONResponse(
         status_code=409,
         content={"status": "ALERT_NOT_OPEN", "message": str(error)},
+    )
+
+
+@app.exception_handler(alert_engine.HostSerialNotCurrent)
+async def handle_host_serial_not_current(
+    request: Request, error: alert_engine.HostSerialNotCurrent
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"status": "HOST_SERIAL_NOT_CURRENT", "message": str(error)},
     )
 
 

@@ -2212,3 +2212,115 @@ merujuk `["cycle_id"]` pada dict hasil `record_inspection()`, diperbaiki
 jadi `["host_serial_code"]`).
 
 ---
+
+## 41 · Lima celah lifecycle prediction/alert (review kedua terhadap master-prompt anti-over-engineering)
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user: audit ulang
+repo dengan batasan sama seperti §37 (jangan over-engineering, jangan
+infrastruktur baru), fokus lima celah spesifik.
+
+**Gap 1 - `host_serial_code` historis bisa me-resolve cycle aktif**:
+`resolve_by_item()` sebelumnya cuma menerjemahkan `host_serial_code` ->
+`item_id` (via `resolve_item_by_host_serial_code()`, cocok journal MANA
+PUN yang pernah pakai serial itu) lalu langsung resolve alert OPEN
+`item_id` itu - TANPA cek apakah serial yang dikirim caller memang cycle
+AKTIF sekarang. Kalau item sudah diperbaiki (cycle baru, serial baru),
+caller yang masih pegang serial LAMA tetap bisa meresolve alert cycle
+BARU yang tidak ada hubungannya dengan laporan mereka.
+
+**Perbaikan**: `resolve_by_item()` sekarang wajib terima `host_serial_code`
+sebagai parameter kedua, dibandingkan terhadap
+`cycle_store.ensure_active_cycle(item_id)["cycle_id"]` SEBELUM apa pun
+diproses (tapi SETELAH cek idempotency `external_event_id`, supaya retry
+yang sah tetap dapat balasan sama). Exception baru `HostSerialNotCurrent`
+-> HTTP 409 `HOST_SERIAL_NOT_CURRENT`. Historical lookup
+(`resolve_item_by_host_serial_code()`) TIDAK dihapus - tetap dipakai
+untuk menerjemahkan serial APA PUN (lama/baru) ke `item_id`, cuma
+sekarang divalidasi tambahan.
+
+**Gap 2 - satu item bisa punya >1 OPEN alert**: constraint lama
+`ux_alert_one_open_per_episode ON (item_id, host_serial_code,
+inspection_seq) WHERE status='OPEN'` cuma mencegah duplikat pada
+KOMBINASI lengkap itu - item dengan alert OPEN di cycle LAMA (belum
+sempat auto-resolve) dan alert OPEN BARU di cycle BARU (host_serial_code
+beda) LOLOS constraint ini, walau `auto_resolve_closed_cycles()` dalam
+kondisi normal seharusnya sudah menutup yang lama duluan.
+
+**Perbaikan**: constraint diperketat jadi `ux_alert_one_open_per_item ON
+(item_id) WHERE status='OPEN'` - satu item_id, titik, bukan lagi
+dikombinasikan host_serial_code/inspection_seq. Dicek langsung lewat DB
+constraint (test insert manual dua host_serial_code beda untuk item_id
+sama -> UniqueViolation), bukan cuma dipercayakan ke urutan pemanggilan
+`auto_resolve_closed_cycles()`. Query duplicate-check di
+`evaluate_and_open()` disederhanakan jadi `WHERE item_id = %s AND
+status='OPEN'` (dulu ikut cek host_serial_code+seq, sekarang tidak
+perlu lagi - constraint DB yang jaga). `open_alerts_by_item()`
+sebelumnya diam-diam menimpa via dict comprehension kalau ada duplikat -
+sekarang mendeteksi kasus itu, log ERROR jelas (item_id + kedua
+alert_id), dan pilih yang `opened_at` terbaru secara deterministik -
+bukan silent overwrite acak.
+
+**Gap 3 - prediction dari model_run FAILED bisa dianggap valid**: karena
+`record_predictions()` commit SEBELUM `evaluate_and_open()`/
+`complete_run()` selesai (§37), baris `item_prediction` sudah bisa
+dibaca (termasuk oleh aplikasi eksternal yang baca schema `predictive`
+langsung) SEBELUM `model_run.status` final diketahui - kalau run itu
+akhirnya FAILED, baris yang sudah kepalang tertulis tetap ada di tabel.
+
+**Perbaikan**: view baru `predictive.valid_item_prediction` (JOIN
+`item_prediction` -> `model_run` WHERE `status='SUCCEEDED'`) - cara aman
+konsumen (internal maupun eksternal) membaca "prediksi yang sah", tanpa
+perlu menulis ulang JOIN itu sendiri tiap kali. Bukan tabel baru (murni
+view, tanpa storage tambahan), bukan orchestration transaksi baru -
+`record_predictions()`/`evaluate_and_open()` TIDAK diubah alurnya sama
+sekali. Alert TIDAK ikut difilter lewat view serupa - alert yang sudah
+OPEN dari run yang sebagian gagal tetap actionable buat teknisi, dan
+predictionnya sendiri (angka p30/p60/dst) tetap benar secara numerik
+walau bookkeeping run-nya berakhir FAILED gara-gara item lain.
+
+**Gap 4 - kontrak `host_serial_code` tidak konsisten**: migration file
+`0001_init.sql` masih menyatakan `item_prediction.host_serial_code TEXT`
+(nullable) padahal Python (`_check_scores_before_persist()`) sudah
+mewajibkannya sejak §40, dan DB LIVE ternyata JUGA masih nullable
+(ke-skip waktu ALTER live sebelumnya - ketahuan justru dari review ini).
+
+**Perbaikan**: migration file diperbaiki jadi `NOT NULL`, `ALTER COLUMN
+... SET NOT NULL` dijalankan ke DB live (tabel kosong, aman). Sekarang
+konsisten empat lapis: DB (`NOT NULL` + constraint), Python
+(`_check_scores_before_persist()` + `AlertResult`/`InspectionResult`
+schema tidak `Optional`), API response, dan dokumentasi.
+
+**Gap 5 - typo field request tidak ditolak**: `InspectionRequest` pakai
+`_CONFIG` yang sama dengan model respons (`extra="allow"`) - typo seperti
+`external_event_idx` diam-diam diabaikan, bukan 422.
+
+**Perbaikan**: `_REQUEST_CONFIG` baru (`extra="forbid"`) KHUSUS untuk
+model request dari aplikasi eksternal - cuma dipasang di
+`InspectionRequest`. Model respons (`HealthResponse`/`InspectionResult`/
+`AlertResult`/`InspectionResponse`) TETAP `_CONFIG` (`extra="allow"`) -
+tidak diubah, supaya tidak berisiko memecahkan sesuatu yang tidak
+diminta.
+
+**Sengaja TIDAK diikutkan** (di luar scope, sesuai batasan eksplisit):
+- Tidak drop+rebuild schema dari nol untuk verifikasi "fresh database" -
+  diblokir classifier keamanan (destructive action), user memilih jalur
+  lebih aman: `python -m partrisk.predictive.db migrate` idempotent
+  terhadap schema yang sudah ada (lolos bersih, membuktikan SQL valid),
+  bukan drop-schema sungguhan.
+- Tidak ada transaction orchestration baru untuk gap 3 (mis. menahan
+  commit `item_prediction` sampai `evaluate_and_open()` selesai) -
+  sesuai instruksi eksplisit "jangan refactor besar-besaran kecuali
+  memang diperlukan", view sudah cukup untuk kebutuhan "konsumen
+  memfilter SUCCEEDED".
+
+**Implementasi**: `alerts.py` (`HostSerialNotCurrent`, `resolve_by_item()`
+signature berubah, `open_alerts_by_item()` deteksi duplikat,
+`evaluate_and_open()` query disederhanakan), `api/app.py` (handler 409
+baru, terusan `host_serial_code`), `api/schemas.py` (`_REQUEST_CONFIG`),
+migrasi 0001/0003 (view, NOT NULL, constraint diganti) + `ALTER` matching
+ke DB live.
+
+**Verifikasi**: test baru untuk kelima gap (lihat daftar test di laporan
+akhir sesi) + `pytest -q` penuh.
+
+---

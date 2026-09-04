@@ -57,8 +57,19 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
                                -- item_id DIBUANG (§40) - append-only + join
                                -- ke prediction_id cuma sesaat setelah
                                -- scoring, host_serial_code sudah cukup.
+                               -- NOT NULL konsisten DB+Python+API sejak §41.
   p30, p60, p90, p120, risk_level, gate_flagged,
   scored_at, model_version
+
+predictive.valid_item_prediction   -- VIEW, §41 - BUKAN tabel
+  = SELECT ip.* FROM item_prediction ip JOIN model_run mr USING (run_id)
+    WHERE mr.status = 'SUCCEEDED'
+  Cara AMAN baca "prediksi yang sah" - item_prediction MENTAH bisa berisi
+  baris dari model_run yang ujungnya FAILED (commit-nya terjadi SEBELUM
+  evaluate_and_open()/complete_run() selesai, §37) - konsumen (internal
+  maupun aplikasi eksternal yang baca schema predictive langsung) yang
+  butuh "prediksi terbaru/aktif" HARUS lewat view ini atau JOIN
+  model_run.status='SUCCEEDED' sendiri, bukan query item_prediction polos.
 
 predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, RENAME §31
   inspection_id, item_id, host_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id),
@@ -91,8 +102,11 @@ predictive.alert                                                  -- Milestone 5
   opened_at, opened_score, status (OPEN/RESOLVED - §33),
   resolved_at, suppression_until,   -- resolution_reason DIBUANG §40
   created_at, updated_at
-  partial UNIQUE(item_id, host_serial_code, inspection_seq) WHERE status='OPEN'
-  - satu episode tidak boleh punya lebih dari satu alert OPEN.
+  partial UNIQUE(item_id) WHERE status='OPEN'   -- diperketat §41, dulu
+  (item_id, host_serial_code, inspection_seq) - satu PHYSICAL ITEM
+  (item_id) tidak boleh punya lebih dari SATU alert OPEN, titik, terlepas
+  dari cycle/host_serial_code-nya. Ditegakkan constraint database, bukan
+  cuma urutan pemanggilan auto_resolve_closed_cycles() di kode.
 ```
 
 Sengaja TIDAK ADA tabel `alert_event` (event-sourcing audit log terpisah) -
@@ -180,12 +194,18 @@ tidak bisa saling tabrak nomor urut.
   bulanan) DAN `python -m partrisk.cli resolve-closed-alerts` (murah,
   boleh dijadwalkan lebih sering - mis. harian - karena tidak perlu skor
   ulang armada).
-- `resolve_by_item(item_id, performed_at)` (docs §28) - **titik masuk**
-  endpoint `POST /api/v1/inspections` (body cuma `host_serial_code`,
-  diresolve ke `item_id` lewat `core.data_reader.
-  resolve_item_by_host_serial_code()`). Kalau item ini SEDANG punya alert
-  OPEN, delegasi ke `resolve_with_inspection()`; kalau tidak, tetap catat
-  inspection tanpa alert (satu POST tetap berarti ada perbaikan, §25).
+- `resolve_by_item(item_id, host_serial_code, performed_at)` (docs §28,
+  validasi host_serial_code §41) - **titik masuk** endpoint
+  `POST /api/v1/inspections` (body `host_serial_code`, diresolve ke
+  `item_id` lewat `core.data_reader.resolve_item_by_host_serial_code()`).
+  SEBELUM diproses, `host_serial_code` yang dikirim caller WAJIB cocok
+  cycle AKTIF item ini sekarang (`cycle_store.ensure_active_cycle()`) -
+  kalau tidak, raise `HostSerialNotCurrent` (HTTP 409
+  `HOST_SERIAL_NOT_CURRENT`) supaya serial code LAMA (dari sebelum
+  perbaikan terakhir) tidak bisa dipakai meresolve alert cycle BARU yang
+  tidak ada hubungannya. Kalau item ini SEDANG punya alert OPEN, delegasi
+  ke `resolve_with_inspection()`; kalau tidak, tetap catat inspection
+  tanpa alert (satu POST tetap berarti ada perbaikan, §25).
 - `resolve_with_inspection(alert_id, performed_at)` (§31, SEBELUMNYA
   `resolve_with_intervention` - rename istilah, arti TIDAK berubah) - jalur
   resolve **MANUAL** yang sesungguhnya, untuk perbaikan kecil yang TIDAK

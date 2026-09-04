@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 _CONFIG = ConfigDict(protected_namespaces=(), extra="allow")
 
+_REQUEST_CONFIG = ConfigDict(protected_namespaces=(), extra="forbid")
+
 
 class HealthResponse(BaseModel):
     model_config = _CONFIG
@@ -30,7 +32,7 @@ class InspectionRequest(BaseModel):
     """Satu perbaikan yang dilaporkan aplikasi eksternal/teknisi terhadap
     satu PART, diidentifikasi lewat `host_serial_code`."""
 
-    model_config = _CONFIG
+    model_config = _REQUEST_CONFIG
 
     host_serial_code: str = Field(
         description="Label fisik PART (format MODEL-PAIRINGCODE-REPAIRSEQ)."

@@ -4,12 +4,16 @@ in-memory.
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 from partrisk.core import config
 from partrisk.predictive import cycles as cycle_store
 from partrisk.predictive import db
 from partrisk.predictive import inspections
+
+logger = logging.getLogger(__name__)
 
 _ALERT_COLUMNS = (
     "alert_id", "terminal_serial_code", "item_id", "host_serial_code", "inspection_seq",
@@ -30,6 +34,21 @@ class AlertNotOpen(ValueError):
         self.alert_id = alert_id
         self.status = status
         super().__init__(f"Alert {alert_id} berstatus {status}, bukan OPEN.")
+
+
+class HostSerialNotCurrent(ValueError):
+    """host_serial_code yang dikirim caller bukan cycle aktif item ini
+    sekarang - kemungkinan caller pakai serial code lama (dari sebelum
+    perbaikan/pemasangan ulang terakhir). docs/DECISIONS.md §41."""
+
+    def __init__(self, item_id: str, given: str, current: str) -> None:
+        self.item_id = item_id
+        self.given_host_serial_code = given
+        self.current_host_serial_code = current
+        super().__init__(
+            f"host_serial_code {given!r} bukan cycle aktif item {item_id!r} saat ini "
+            f"(cycle aktif: {current!r}) - kemungkinan serial code lama/sudah diganti."
+        )
 
 
 class AlertCycleMismatch(ValueError):
@@ -73,7 +92,23 @@ def open_alerts_by_item(item_ids: list[str] | None = None) -> dict[str, dict]:
         with conn.cursor() as cur:
             cur.execute(query, params)
             rows = cur.fetchall()
-    return {alert["item_id"]: alert for alert in (_row_to_alert(row) for row in rows)}
+
+    alerts = [_row_to_alert(row) for row in rows]
+    by_item: dict[str, dict] = {}
+    for alert in alerts:
+        existing = by_item.get(alert["item_id"])
+        if existing is not None:
+            logger.error(
+                "DUPLICATE OPEN alert untuk item_id=%s: alert_id %s dan %s sama-sama OPEN "
+                "(seharusnya dicegah constraint ux_alert_one_open_per_item) - pakai yang "
+                "opened_at terbaru, alert lain butuh investigasi manual.",
+                alert["item_id"], existing["alert_id"], alert["alert_id"],
+            )
+            if alert["opened_at"] > existing["opened_at"]:
+                by_item[alert["item_id"]] = alert
+        else:
+            by_item[alert["item_id"]] = alert
+    return by_item
 
 
 def _next_inspection_seq(cur, host_serial_code: str) -> int:
@@ -151,15 +186,25 @@ def _emergency_override(current_score: float, previous_score: float | None) -> b
 
 
 def resolve_by_item(
-    item_id: str, performed_at: pd.Timestamp, external_event_id: str | None = None
+    item_id: str,
+    host_serial_code: str,
+    performed_at: pd.Timestamp,
+    external_event_id: str | None = None,
 ) -> dict:
     """Jalur MANUAL diidentifikasi lewat item (bukan alert_id).
-    `external_event_id` opsional - retry idempotent, lihat docs/CODE_NOTES.md."""
+    `host_serial_code` harus cycle AKTIF item ini sekarang - raise
+    `HostSerialNotCurrent` kalau caller pakai serial code lama
+    (docs/DECISIONS.md §41). `external_event_id` opsional - retry
+    idempotent, lihat docs/CODE_NOTES.md."""
     if external_event_id is not None:
         existing = inspections.find_by_external_event_id(external_event_id)
         if existing is not None:
             alert = get_alert(existing["alert_id"]) if existing["alert_id"] is not None else None
             return {"inspection": existing, "alert": alert}
+
+    current_cycle = cycle_store.ensure_active_cycle(item_id)
+    if current_cycle["cycle_id"] != host_serial_code:
+        raise HostSerialNotCurrent(item_id, host_serial_code, current_cycle["cycle_id"])
 
     alert = open_alerts_by_item([item_id]).get(item_id)
     if alert is not None:
@@ -203,11 +248,8 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
                 next_seq = _next_inspection_seq(cur, host_serial_code)
 
                 cur.execute(
-                    """
-                    SELECT 1 FROM predictive.alert
-                    WHERE item_id = %s AND host_serial_code = %s AND inspection_seq = %s AND status = 'OPEN'
-                    """,
-                    (item_id, host_serial_code, next_seq),
+                    "SELECT 1 FROM predictive.alert WHERE item_id = %s AND status = 'OPEN'",
+                    (item_id,),
                 )
                 if cur.fetchone() is not None:
                     continue
