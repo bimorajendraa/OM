@@ -40,18 +40,8 @@ def db_settings() -> dict[str, str]:
 
 PREDICTIVE_SCHEMA = "predictive"
 
-# Setelah alert di-resolve (intervention tercatat), berapa lama re-alert
-# DITAHAN pada episode berikutnya (docs §24 master prompt) - PLACEHOLDER
-# awal, belum divalidasi lewat data operasional nyata (beda dari
-# FAILURE_GATE_TARGET_PRECISION yang lewat eksperimen panjang, lihat
-# docs/EXPERIMENTS.md) - revisit begitu ada riwayat resolve/re-alert nyata
-# untuk dievaluasi.
 ALERT_SUPPRESSION_DAYS = 14
 
-# Emergency override (docs §25 master prompt): re-alert BOLEH menembus masa
-# suppression kalau risiko naik drastis dibanding skor saat alert
-# terakhir di-resolve - salah satu syarat berikut cukup. Sama-sama
-# PLACEHOLDER, sama alasannya seperti ALERT_SUPPRESSION_DAYS di atas.
 ALERT_EMERGENCY_SCORE_JUMP = 0.30
 ALERT_EMERGENCY_SCORE_ABSOLUTE = 0.80
 

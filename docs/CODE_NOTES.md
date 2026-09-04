@@ -1,6 +1,6 @@
 # Code Notes
 
-Komentar penjelasan yang sebelumnya berada di file Python dalam `src/`, `dashboard/`, dan `tests/` dipusatkan di sini. Nomor baris adalah lokasi sebelum pemindahan dan dipertahankan untuk audit historis; gunakan nama scope sebagai rujukan stabil ketika kode berubah. Docstring dan string deskripsi runtime bukan komentar sehingga tetap berada di kode. Directive teknis seperti `# noqa` dan `# type: ignore` juga tetap berada di kode.
+Komentar penjelasan (termasuk docstring panjang berisi alasan/riwayat desain) yang sebelumnya berada di file kode - Python dalam `src/` dan `tests/`, SQL dalam `migrations/` - dipusatkan di sini. Nomor baris adalah lokasi sebelum pemindahan dan dipertahankan untuk audit historis; gunakan nama scope sebagai rujukan stabil ketika kode berubah. String deskripsi runtime yang benar-benar dibaca konsumen (mis. deskripsi endpoint FastAPI yang muncul di `/docs`) tetap berada di kode, tapi dalam bentuk ringkas - versi panjangnya (alasan desain, riwayat keputusan) dipindah ke sini juga. Directive teknis seperti `# noqa` dan `# type: ignore` tetap berada di kode. `dashboard/` sudah dihapus (docs/DECISIONS.md §29) - entri di bawah untuk direktori itu dipertahankan apa adanya sebagai arsip historis.
 
 ## `dashboard/api_client.py`
 
@@ -67,6 +67,40 @@ Komentar penjelasan yang sebelumnya berada di file Python dalam `src/`, `dashboa
 > dibungkus kotak yang bisa digeser horizontal, bukan
 > dipaksa menyusut (yang bikin tick 20-harian berdesakan).
 
+## `migrations/predictive/0001_init.sql`
+
+### `module` — SQL, former lines 1
+
+> Dijalankan lewat: python -m partrisk.predictive.db migrate
+
+### `predictive.item_prediction` — SQL, former lines 16
+
+> item_prediction APPEND-ONLY
+
+### `predictive.item_prediction` — SQL, former lines 25-26
+
+> Diisi mulai Milestone 4 (installation cycle/inspection) - NULL sampai saat itu, bukan data yang dikarang.
+
+## `migrations/predictive/0002_lifecycle.sql`
+
+### `module` — SQL, former lines 1-7
+
+> Sengaja TIDAK ada tabel item_cycle (SUPERSEDED, docs/DECISIONS.md §30) - info cycle dibaca LANGSUNG dari data operasional (core.data_reader.get_cycles()) tiap dibutuhkan, tidak lagi disalin. Concurrency saat menghitung inspection_seq dijaga lewat Postgres advisory lock (pg_advisory_xact_lock, per item_id - lihat predictive/cycles.py::lock_item()) yang tidak butuh baris/tabel untuk dikunci, jadi tabel mirror ini tidak diperlukan lagi.
+
+### `predictive.inspection` — SQL, former lines 9-19
+
+> "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): satu baris di sini SUDAH BERARTI satu perbaikan terjadi, apa pun bentuknya (keputusan user, docs/DECISIONS.md §25 update) - BUKAN sekadar "diperiksa", walau namanya "inspection". Sengaja TIDAK ada kolom klasifikasi jenis (type). Sengaja TIDAK ada outcome/action_code/remark/external_* juga - body POST /api/v1/inspections cuma host_serial_code (docs/DECISIONS.md §28), jadi tidak ada lagi apa pun untuk diisi ke kolom itu; idempotency eksternal via external_event_id SENGAJA dilepas (trade-off yang disetujui eksplisit demi kesederhanaan body request - retry menghasilkan baris inspection baru, bukan ditolak).
+
+## `migrations/predictive/0003_alerts.sql`
+
+### `predictive.alert` — SQL, former lines 33-36 (`ux_alert_one_per_prediction`)
+
+> Satu prediction menghasilkan NOL atau SATU alert, tidak pernah lebih (docs/DECISIONS.md §32) - NULL diperbolehkan berulang (alert sintetis di test, atau alert lama dari sebelum §32 yang belum ditautkan), tapi kalau prediction_id TERISI, harus unik.
+
+### `predictive.alert` — SQL, former lines 41-46 (sebelum `ALTER TABLE predictive.inspection`)
+
+> Sengaja TIDAK ada tabel alert_event terpisah (event-sourcing audit log) - SUPERSEDED, lihat docs/DECISIONS.md §28. Tidak ada satu pun kode yang MEMBACA tabel itu (murni ditulis, tidak pernah dipakai keputusan apa pun) - informasinya sudah lengkap di kolom alert.opened_at/resolved_at/resolution_reason, jadi tabel terpisah cuma menduplikasi data tanpa consumer nyata.
+
 ## `src/partrisk/api/app.py`
 
 ### `module` — Python, former lines 44
@@ -131,6 +165,20 @@ Komentar penjelasan yang sebelumnya berada di file Python dalam `src/`, `dashboa
 ### `lifespan` — directive note, former lines 547
 
 > start tidak boleh gagal karenanya
+
+### `record_inspection` — Python, former lines 193-212 (docs/DECISIONS.md §31/§32)
+
+> Catat satu perbaikan terhadap satu PART - jalur MANUAL untuk tindakan yang TIDAK PERNAH masuk data operasional (mis. sekadar mengencangkan baut). "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): tetap berarti ada PERBAIKAN, bukan sekadar "diperiksa". Kalau perbaikannya berupa work order corrective/preventive yang berakhir dismantle, itu sudah tercatat di data operasional dan alert mati SENDIRI (jalur otomatis, lihat predictive/alerts.py::auto_resolve_closed_cycles()) - endpoint ini tidak perlu dipanggil untuk kasus itu. Diidentifikasi lewat `host_serial_code` (label fisik PART), BUKAN alert_id internal - aplikasi eksternal tidak pernah tahu alert_id (tidak ada GET /alerts, lihat docs/DECISIONS.md §26/§28). Kalau PART ini SEDANG punya alert OPEN, alert itu ikut di-RESOLVE; kalau tidak, inspection tetap dicatat (satu POST SUDAH BERARTI satu perbaikan terjadi) tanpa ada alert yang ditutup. `performed_at` diambil dari waktu server menerima request, TIDAK ada idempotency key eksternal - retry akan membuat baris inspection baru (docs/DECISIONS.md §28, trade-off disetujui eksplisit demi kesederhanaan body request).
+
+### `module` — Python, former lines 210-213 (`DESCRIPTION`)
+
+> API predictive maintenance - satu-satunya endpoint publik yang dibutuhkan aplikasi eksternal adalah `POST /api/v1/inspections` (docs/DECISIONS.md §28/§29/§31). Tidak ada endpoint GET untuk data prediksi/rekomendasi/terminal - aplikasi eksternal baca schema `predictive` langsung dari database.
+
+## `src/partrisk/api/schemas.py`
+
+### `InspectionRequest` — Python, former lines 30-37 (docs/DECISIONS.md §28/§31)
+
+> Satu perbaikan yang dilaporkan aplikasi eksternal/teknisi terhadap satu PART - lihat docs/DECISIONS.md §28/§31. "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah): tetap berarti ada PERBAIKAN, bukan sekadar "diperiksa". Diidentifikasi lewat `host_serial_code` (label fisik PART, BUKAN alert_id internal - aplikasi eksternal tidak pernah tahu alert_id). Tidak ada field lain - satu POST di sini SUDAH BERARTI satu perbaikan terjadi, waktunya diambil dari saat server menerima request.
 
 ## `src/partrisk/api/services.py`
 
@@ -296,6 +344,14 @@ Komentar penjelasan yang sebelumnya berada di file Python dalam `src/`, `dashboa
 
 > ── DATABASE ──
 
+### `module` — Python, former lines 43-48 (`ALERT_SUPPRESSION_DAYS`)
+
+> Setelah alert di-resolve (inspection tercatat), berapa lama re-alert DITAHAN pada episode berikutnya (docs §24 master prompt) - PLACEHOLDER awal, belum divalidasi lewat data operasional nyata (beda dari FAILURE_GATE_TARGET_PRECISION yang lewat eksperimen panjang, lihat docs/EXPERIMENTS.md) - revisit begitu ada riwayat resolve/re-alert nyata untuk dievaluasi.
+
+### `module` — Python, former lines 51-54 (`ALERT_EMERGENCY_SCORE_JUMP`/`ALERT_EMERGENCY_SCORE_ABSOLUTE`)
+
+> Emergency override (docs §25 master prompt): re-alert BOLEH menembus masa suppression kalau risiko naik drastis dibanding skor saat alert terakhir di-resolve - salah satu syarat berikut cukup. Sama-sama PLACEHOLDER, sama alasannya seperti ALERT_SUPPRESSION_DAYS di atas.
+
 ### `module` — Python, former lines 47
 
 > ── FAILURE ──
@@ -395,6 +451,10 @@ Komentar penjelasan yang sebelumnya berada di file Python dalam `src/`, `dashboa
 ### `get_cycles` — embedded SQL, former lines 641
 
 > Batas akhir observasi yang hasil negatifnya masih bisa dipastikan.
+
+### `resolve_item_by_host_serial_code` — Python, former lines 674-683 (docs/DECISIONS.md §28)
+
+> Cari item_id internal (item_identifier_clean, dipakai seluruh schema predictive - cycle/inspection/alert) dari host_serial_code: label fisik format MODEL-PAIRINGCODE-REPAIRSEQ yang dibaca teknisi/aplikasi eksternal dari kode PART (journal.t_item_journey.host_serial_code) - lihat docs/DECISIONS.md §28. Ambil catatan journal TERBARU yang cocok, bukan yang pertama - host_serial_code menyertakan repair_seq yang berubah tiap perbaikan besar, jadi PART fisik yang sama bisa punya beberapa host_serial_code berbeda sepanjang riwayatnya. Return None kalau tidak ada journal yang cocok sama sekali.
 
 ## `src/partrisk/core/features.py`
 
@@ -838,6 +898,139 @@ Komentar penjelasan yang sebelumnya berada di file Python dalam `src/`, `dashboa
 > TEST yang sama akan dipakai berulang kali lintas retrain kalau dia
 > jadi dasar keputusan. TEST tetap dihitung/dicetak di atas untuk
 > laporan, bukan lagi dasar keputusan.
+
+## `src/partrisk/predictive/alerts.py`
+
+### `module` — Python, former lines 1-30
+
+> Alert lifecycle persisten (predictive.alert) - menggantikan serving/alerts.py in-memory. Lihat docs/DATABASE.md dan docs §16-25 master prompt refactor.
+>
+> Pemisahan tanggung jawab (docs §2 master prompt):
+> - FAILURE MODEL memutuskan skor (serving/batch.py, tidak berubah).
+> - ALERT ENGINE (modul ini) memutuskan apakah skor itu perlu jadi alert.
+> - TEKNISI/aplikasi eksternal mencatat tindakan (predictive/inspections.py).
+>
+> Alert HANYA dibuka dari siklus scheduled scoring (`evaluate_and_open`, dipanggil dari predictive/scoring.py::run_and_persist()) - TIDAK PERNAH dari jalur baca live (serving/batch.py hanya membaca status alert yang sudah ada, lihat open_alerts_by_item()).
+>
+> DUA jalan untuk mematikan alert (klarifikasi user 2026-09-03):
+> 1. OTOMATIS (`auto_resolve_closed_cycles`) - work order corrective/preventive yang berakhir dismantle SUDAH tercatat di data operasional (`core.data_reader.get_cycles()`) - itu sendiri sudah bukti PART ditangani, alert mati sendiri tanpa laporan terpisah.
+> 2. MANUAL lewat inspection (`resolve_by_item` -> `resolve_with_inspection`, endpoint `POST /api/v1/inspections`, body cuma `host_serial_code`) - untuk perbaikan KECIL yang TIDAK PERNAH masuk data operasional (mis. cuma kencangkan baut) - satu-satunya cara sistem tahu itu terjadi adalah laporan eksplisit ini. Diidentifikasi lewat item (docs/DECISIONS.md §28), BUKAN alert_id - aplikasi eksternal tidak pernah tahu alert_id internal (tidak ada GET /alerts, lihat §26).
+>
+> "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): satu POST tetap berarti ada PERBAIKAN, BUKAN sekadar "diperiksa".
+
+### `AlertCycleMismatch` — Python, former lines 63-68
+
+> Item sudah pindah cycle sejak alert ini dibuka, TAPI cycle lamanya TERNYATA belum tercatat tertutup di data operasional - keadaan yang seharusnya tidak terjadi (auto-resolve harusnya sudah menangani cycle yang benar-benar tertutup, lihat _auto_resolve_if_cycle_closed). Ditolak eksplisit alih-alih menempelkan inspection ke cycle yang sudah tidak aktif.
+
+### `open_alerts_by_item` — Python, former lines 96-99
+
+> Baca status alert OPEN saat ini, per item_id - dipakai `auto_resolve_closed_cycles()`/`resolve_by_item()` untuk mencari alert OPEN milik satu/beberapa item. TIDAK PERNAH membuka/menutup alert apa pun, murni baca.
+
+### `open_alerts_by_item` — Python, former lines 110
+
+> index 3 = item_id
+
+### `evaluate_and_open` — Python, former lines 271-274
+
+> terminal_serial_code di sini = serial code fisik terminal (frame["terminal_label"]), BUKAN ID internal terminal_inventory_item_id - sama seperti predictive/scoring.py::record_predictions(), lihat WHY di sana.
+
+### `_auto_resolve_if_cycle_closed` — Python, former lines 143-154
+
+> Dua jalan untuk mematikan alert (docs - klarifikasi user 2026-09-03): (1) inspection tercatat lewat API (resolve_with_inspection) - untuk perbaikan KECIL yang tidak pernah masuk data operasional (mis. cuma kencangkan baut), atau (2) OTOMATIS di sini - work order corrective/preventive yang berakhir dismantle SUDAH tercatat di data operasional (data_reader.get_cycles(), cycle_end_reason FAILURE/RETURNED/DISMANTLED, dibaca langsung tiap panggilan - docs/DECISIONS.md §30) - itu sendiri sudah bukti PART ditangani, tidak perlu laporan inspection terpisah lewat API. Return baris alert yang baru di-RESOLVE (kalau cycle-nya memang sudah tertutup), None kalau cycle masih aktif (tidak melakukan apa-apa).
+
+### `auto_resolve_closed_cycles` — Python, former lines 178-185
+
+> RESOLVE otomatis setiap alert OPEN yang cycle-nya ternyata sudah tertutup di data operasional (dismantle/failure/return sungguhan sudah tercatat, dibaca langsung tiap panggilan) - dipanggil di awal setiap evaluate_and_open(). Dipisah jadi fungsi sendiri (bukan inline di evaluate_and_open) supaya bisa juga dipanggil untuk SATU alert saja dari resolve_with_inspection saat mendeteksi cycle sudah berpindah.
+
+### `_emergency_override` — Python, former lines 200-202
+
+> docs §25 master prompt - lonjakan skor tajam atau skor sudah sangat tinggi membuka alert BARU walau masih dalam masa suppression. Nilai ambang: lihat WHY di core/config.py (belum divalidasi data nyata).
+
+### `resolve_by_item` — Python, former lines 211-222
+
+> Jalur MANUAL diidentifikasi lewat item (bukan alert_id) - dipakai endpoint `POST /api/v1/inspections`, body-nya cuma `host_serial_code` (diresolve ke `item_id` internal oleh caller lewat `core.data_reader.resolve_item_by_host_serial_code()` sebelum masuk sini - lihat docs/DECISIONS.md §28). Kalau item ini SEDANG punya alert OPEN, resolve alert itu - delegasi penuh ke `resolve_with_inspection()` (transaksi/suppression/cycle-mismatch-handling yang sama persis, tidak diduplikasi di sini). Kalau TIDAK ada alert OPEN, tetap catat inspection - satu POST tetap berarti ada perbaikan (docs/DECISIONS.md §25), hanya saja tidak ada alert yang perlu ditutup.
+
+### `evaluate_and_open` — Python, former lines 234-254
+
+> Satu siklus evaluasi alert - dipanggil SEKALI per scheduled scoring run (predictive/scoring.py::run_and_persist()), bukan per request live. Langkah 0 (docs - klarifikasi user 2026-09-03): auto-resolve dulu semua alert OPEN yang cycle-nya SUDAH tertutup di data operasional (corrective/preventive work order yang berakhir dismantle - lihat auto_resolve_closed_cycles()). Item yang baru dilepas TIDAK MUNCUL lagi di `frame` (sudah bukan PART aktif), jadi ini dicek terpisah dari seluruh alert OPEN, bukan dari isi `frame`. Untuk tiap PART yang gate_flagged di `frame`: sinkron cycle-nya, lewati kalau sudah ada alert OPEN untuk episode yang sama, lewati kalau masih dalam masa suppression (kecuali emergency override), lalu buka alert baru - `alert.prediction_id` ditautkan ke baris `item_prediction` yang memicunya (`frame["prediction_id"]`, diisi `scoring.py::run_and_persist()` - docs/DECISIONS.md §32). Satu prediction menghasilkan NOL atau SATU alert, tidak pernah lebih - ditegakkan `UNIQUE(prediction_id)` di `predictive.alert`. Return daftar alert_id yang baru dibuka pada run ini (TIDAK termasuk yang auto-resolved).
+
+### `resolve_with_inspection` — Python, former lines 321-336
+
+> Jalur MANUAL untuk mematikan alert - untuk perbaikan yang TIDAK tercatat di data operasional (mis. sekadar mengencangkan baut). Kalau perbaikannya sudah tercatat di data operasional (work order corrective/preventive yang berakhir dismantle), alert mati sendiri lewat jalur OTOMATIS (auto_resolve_closed_cycles(), dipanggil dari evaluate_and_open()) - endpoint ini tidak perlu dipanggil untuk kasus itu, dan kalau tetap dipanggil, akan melihat alert ini sudah RESOLVED. Transaksi tunggal (docs §22 master prompt): validasi alert -> validasi cycle -> insert inspection -> resolve alert -> set suppression -> commit. Gagal di tengah = ROLLBACK, alert tidak pernah tersisa RESOLVED tanpa inspection atau sebaliknya. Tidak idempotent (docs/DECISIONS.md §28) - tidak ada identifier eksternal untuk dideteksi ulang, dipanggil lewat `resolve_by_item()` yang sudah memastikan hanya alert OPEN yang diproses.
+
+### `resolve_with_inspection` — Python, former lines 348-354
+
+> Baca cycle aktif LANGSUNG dari data operasional (cycles.py::ensure_active_cycle(), tidak ada yang ditulis). Kalau item sudah pindah cycle sejak alert ini dibuka, itu berarti cycle LAMA sudah tertutup di data operasional (dismantle/failure/return) - auto-resolve alert ini dulu (jalur OTOMATIS, docs - klarifikasi user), baru laporkan ke pemanggil bahwa alert ini SUDAH selesai (bukan lewat inspection yang baru saja dikirim).
+
+### `resolve_with_inspection` — Python, former lines 374-375
+
+> Kunci ulang baris alert DI DALAM transaksi (defends terhadap race dengan resolve lain yang lolos pengecekan awal di atas).
+
+## `src/partrisk/predictive/cycles.py`
+
+### `module` — Python, former lines 1-7
+
+> Info siklus fisik operasional (core.data_reader.get_cycles()) - dibaca LANGSUNG tiap dibutuhkan, TIDAK disalin ke tabel predictive.item_cycle (tabel itu dihapus, docs/DECISIONS.md §30) - volume operasi alert terlalu kecil (~1/bulan) untuk butuh cache lokal, dan concurrency saat menghitung inspection_seq dijaga lewat Postgres advisory lock (lock_item()) yang tidak butuh baris/tabel untuk dikunci sama sekali.
+
+### `module` — Python, former lines 13-16 (`_STILL_ACTIVE_REASON`)
+
+> RIGHT_CENSORED_AT_DATA_END = "belum ada event penutup sampai batas data terakhir" (bukan penutupan fisik sungguhan) - satu-satunya alasan cycle dianggap masih aktif. Semua reason lain (FAILURE/RETURNED/DISMANTLED) berarti cycle itu benar-benar sudah berakhir secara fisik.
+
+### `ensure_active_cycle` — Python, former lines 30-33
+
+> Cycle AKTIF item ini SAAT INI, dibaca langsung dari data operasional - tidak ada apa pun yang ditulis. Raise ItemNotInstalled kalau item tidak dikenal atau tidak sedang terpasang - inspection/alert tidak bisa dicatat untuk item yang tidak punya cycle aktif.
+
+### `cycle_status` — Python, former lines 52-55
+
+> Status cycle TERTENTU (dikenali lewat cycle_id) - dipakai auto-resolve (alerts.py) untuk cek apakah cycle yang tercatat di satu alert SUDAH tertutup di data operasional. Return None kalau cycle_id itu tidak ditemukan sama sekali di riwayat item ini.
+
+### `lock_item` — Python, former lines 72-77
+
+> Kunci transaksional per-item (Postgres advisory lock) - serialize dua penulis yang menghitung inspection_seq untuk item yang SAMA secara bersamaan, tanpa butuh baris/tabel untuk dikunci (schema operasional read-only, tidak bisa SELECT ... FOR UPDATE di sana - docs/DECISIONS.md §30). Lock otomatis lepas saat transaksi commit/rollback - HARUS dipanggil di dalam transaksi yang sama dengan penghitungan seq/insert.
+
+## `src/partrisk/predictive/inspections.py`
+
+### `module` — Python, former lines 1-14
+
+> Pencatatan tindakan teknisi/aplikasi eksternal (predictive.inspection) - lihat docs/DATABASE.md dan docs §10/22/23 master prompt refactor.
+>
+> "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): tidak ada klasifikasi jenis - satu POST berarti satu PERBAIKAN terjadi, apa pun bentuknya (keputusan user, docs/DECISIONS.md §25 update), BUKAN sekadar "diperiksa". Tidak ada outcome/remark/external_* juga - body POST /api/v1/inspections cuma host_serial_code (docs/DECISIONS.md §28), tidak ada idempotency key eksternal (retry membuat baris baru, trade-off yang disetujui eksplisit).
+>
+> Minor repair TIDAK menutup installation cycle - inspection_seq naik DALAM cycle aktif yang sama (predictive/cycles.py), bukan membuka cycle baru.
+
+### `record_inspection` — Python, former lines 54-57
+
+> Catat satu inspection (perbaikan) untuk `item_id`, DALAM cycle aktifnya saat ini. Tidak idempotent - tidak ada identifier eksternal untuk dideteksi ulang (docs/DECISIONS.md §28), setiap panggilan selalu membuat baris baru.
+
+### `record_inspection` — Python, former lines 66-69
+
+> Kunci item ini (advisory lock, docs/DECISIONS.md §30) supaya dua inspection untuk item yang SAMA tidak bisa menghitung inspection_seq berikutnya secara bersamaan (race condition) - writer kedua menunggu, bukan gagal karena UNIQUE(cycle_id, inspection_seq).
+
+## `src/partrisk/predictive/scoring.py`
+
+### `module` — Python, former lines 1-8
+
+> Menyimpan hasil batch scoring failure (Q2) ke schema `predictive` - `model_run` + `item_prediction` (append-only). Dipanggil eksplisit (CLI `score-and-persist`, dipanggil scheduler eksternal berkala) - BUKAN otomatis di setiap `serving.batch.score_active_parts()`, supaya batch ad-hoc (API on-demand, CLI predict, test, golden-batch) tidak ikut menulis baris ke riwayat prediksi setiap kali dipanggil.
+
+### `record_predictions` — Python, former lines 80-89
+
+> Tulis satu baris `item_prediction` per PART di `frame` (hasil `serving.batch.score_active_parts().frame`). APPEND-ONLY - tidak pernah UPDATE/DELETE baris lama, prediction_id sebelumnya tetap ada. Kolom `terminal_serial_code` di sini diisi `frame["terminal_label"]` (serial code fisik terminal, docs/DECISIONS.md §28) - BUKAN `frame["terminal_id"]` (ID internal `terminal_inventory_item_id` yang dipakai jalur live/filtering di serving/batch.py, TIDAK berubah) - supaya aplikasi eksternal yang baca tabel ini bisa mengorelasikan terminal pakai kode yang sama dengan sistem mereka sendiri.
+
+### `prediction_ids_for_run` — Python, former lines 126-131
+
+> item_id -> prediction_id untuk satu run - dipakai run_and_persist() untuk menautkan alert.prediction_id ke baris item_prediction yang memicunya (docs/DECISIONS.md §32). Query terpisah (bukan RETURNING pada executemany di record_predictions()) supaya kontrak record_predictions() tidak berubah - satu item_id cuma muncul sekali per run, jadi lookup ini selalu unik.
+
+### `run_and_persist` — Python, former lines 143-149
+
+> Satu siklus scoring: skor SELURUH PART aktif (force refresh, tidak pakai cache lama), simpan sebagai model_run + item_prediction baru. Dipanggil scheduler eksternal secara berkala (mis. cron) - lihat CLI `score-and-persist`. Kegagalan DI TENGAH scoring dicatat sebagai model_run FAILED, bukan diam-diam hilang.
+
+### `run_and_persist` — Python, former lines 169-172
+
+> Tautkan tiap baris frame ke prediction_id yang baru ditulis, supaya alert yang dibuka evaluate_and_open() bisa menyimpan alert.prediction_id (docs/DECISIONS.md §32) - satu prediction menghasilkan NOL atau SATU alert, tidak pernah lebih (ditegakkan UNIQUE(prediction_id) di alert).
+
+### `run_and_persist` — Python, former lines 176-178
+
+> Evaluasi alert SETELAH model_run tercatat SUCCEEDED - kegagalan di sini tidak mengubah status run (prediksi sudah aman tersimpan), tapi tetap dilaporkan keras (raise), bukan ditelan diam-diam.
 
 ## `src/partrisk/serving/alerts.py`
 

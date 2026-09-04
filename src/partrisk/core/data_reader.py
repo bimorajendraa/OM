@@ -672,7 +672,7 @@ normalize = _normalize
 
 def resolve_item_by_host_serial_code(host_serial_code: str) -> str | None:
     """Cari item_id internal (item_identifier_clean, dipakai seluruh schema
-    predictive - cycle/intervention/alert) dari host_serial_code: label fisik
+    predictive - cycle/inspection/alert) dari host_serial_code: label fisik
     format MODEL-PAIRINGCODE-REPAIRSEQ yang dibaca teknisi/aplikasi eksternal
     dari kode PART (journal.t_item_journey.host_serial_code) - lihat
     docs/DECISIONS.md §28.

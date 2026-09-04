@@ -1,11 +1,5 @@
-"""Menyimpan hasil batch scoring failure (Q2) ke schema `predictive` -
-`model_run` + `item_prediction` (append-only).
-
-Dipanggil eksplisit (CLI `score-and-persist`, dipanggil scheduler eksternal
-berkala) - BUKAN otomatis di setiap `serving.batch.score_active_parts()`,
-supaya batch ad-hoc (API on-demand, CLI predict, test, golden-batch) tidak
-ikut menulis baris ke riwayat prediksi setiap kali dipanggil.
-"""
+"""Menyimpan hasil batch scoring failure ke schema `predictive` -
+`model_run` + `item_prediction` (append-only)."""
 
 from __future__ import annotations
 
@@ -64,7 +58,7 @@ def fail_run(run_id: int, error_message: str) -> None:
 
 
 _PREDICTION_COLUMNS = (
-    "run_id", "terminal_id", "part_type", "item_id",
+    "run_id", "terminal_serial_code", "part_type", "item_id",
     "p30", "p60", "p90", "p120", "risk_level", "gate_flagged",
     "scored_at", "model_version", "feature_version",
 )
@@ -77,16 +71,7 @@ def record_predictions(
     scored_at: pd.Timestamp,
     feature_version: str | None = None,
 ) -> int:
-    """Tulis satu baris `item_prediction` per PART di `frame` (hasil
-    `serving.batch.score_active_parts().frame`). APPEND-ONLY - tidak pernah
-    UPDATE/DELETE baris lama, prediction_id sebelumnya tetap ada.
-
-    Kolom `terminal_id` di sini diisi `frame["terminal_label"]` (serial code
-    fisik terminal, docs/DECISIONS.md §28) - BUKAN `frame["terminal_id"]`
-    (ID internal `terminal_inventory_item_id` yang dipakai jalur live/
-    filtering di serving/batch.py, TIDAK berubah) - supaya aplikasi eksternal
-    yang baca tabel ini bisa mengorelasikan terminal pakai kode yang sama
-    dengan sistem mereka sendiri."""
+    """Tulis satu baris `item_prediction` per PART di `frame`. APPEND-ONLY."""
     rows = [
         (
             run_id,
@@ -122,14 +107,21 @@ def record_predictions(
     return len(rows)
 
 
-def run_and_persist() -> dict:
-    """Satu siklus scoring: skor SELURUH PART aktif (force refresh, tidak
-    pakai cache lama), simpan sebagai model_run + item_prediction baru.
+def prediction_ids_for_run(run_id: int) -> dict[str, int]:
+    """item_id -> prediction_id untuk satu run."""
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT item_id, prediction_id FROM predictive.item_prediction WHERE run_id = %s",
+                (run_id,),
+            )
+            rows = cur.fetchall()
+    return {item_id: prediction_id for item_id, prediction_id in rows}
 
-    Dipanggil scheduler eksternal secara berkala (mis. cron) - lihat CLI
-    `score-and-persist`. Kegagalan DI TENGAH scoring dicatat sebagai
-    model_run FAILED, bukan diam-diam hilang.
-    """
+
+def run_and_persist() -> dict:
+    """Satu siklus scoring: skor seluruh PART aktif, simpan sebagai
+    model_run + item_prediction baru, lalu evaluasi alert."""
     from partrisk.predictive import alerts as alert_engine
     from partrisk.serving import batch as serving_batch
 
@@ -149,9 +141,9 @@ def run_and_persist() -> dict:
             fail_run(run_id, str(error))
         raise
 
-    # Evaluasi alert SETELAH model_run tercatat SUCCEEDED - kegagalan di sini
-    # tidak mengubah status run (prediksi sudah aman tersimpan), tapi tetap
-    # dilaporkan keras (raise), bukan ditelan diam-diam.
+    prediction_ids = prediction_ids_for_run(run_id)
+    scores.frame["prediction_id"] = scores.frame["item_id"].map(prediction_ids)
+
     opened_alert_ids = alert_engine.evaluate_and_open(scores.frame, scored_at)
     if opened_alert_ids:
         logger.info("run_id %s membuka %d alert baru: %s", run_id, len(opened_alert_ids), opened_alert_ids)

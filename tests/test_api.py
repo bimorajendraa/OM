@@ -57,7 +57,7 @@ def test_require_api_key_terbuka_tanpa_konfigurasi(client, monkeypatch):
     import partrisk.api.app as api_app
 
     monkeypatch.setattr(api_app, "API_KEY", None)
-    response = client.post("/api/v1/interventions", json={"host_serial_code": "TIDAK-ADA"})
+    response = client.post("/api/v1/inspections", json={"host_serial_code": "TIDAK-ADA"})
     assert response.status_code != 401
 
 
@@ -65,7 +65,7 @@ def test_require_api_key_menolak_tanpa_header_saat_dikonfigurasi(client, monkeyp
     import partrisk.api.app as api_app
 
     monkeypatch.setattr(api_app, "API_KEY", "rahasia-test")
-    response = client.post("/api/v1/interventions", json={"host_serial_code": "TIDAK-ADA"})
+    response = client.post("/api/v1/inspections", json={"host_serial_code": "TIDAK-ADA"})
     assert response.status_code == 401
 
 
@@ -74,7 +74,7 @@ def test_require_api_key_menolak_header_yang_salah(client, monkeypatch):
 
     monkeypatch.setattr(api_app, "API_KEY", "rahasia-test")
     response = client.post(
-        "/api/v1/interventions",
+        "/api/v1/inspections",
         json={"host_serial_code": "TIDAK-ADA"},
         headers={"X-API-Key": "salah"},
     )
@@ -86,7 +86,7 @@ def test_require_api_key_menerima_header_yang_cocok(client, monkeypatch):
 
     monkeypatch.setattr(api_app, "API_KEY", "rahasia-test")
     response = client.post(
-        "/api/v1/interventions",
+        "/api/v1/inspections",
         json={"host_serial_code": "TIDAK-ADA"},
         headers={"X-API-Key": "rahasia-test"},
     )
@@ -105,15 +105,15 @@ def test_tidak_ada_endpoint_training(client):
         assert client.post(path).status_code in (404, 405)
 
 
-def test_intervention_endpoint_serial_code_tidak_ada_mengembalikan_404(client):
+def test_inspection_endpoint_serial_code_tidak_ada_mengembalikan_404(client):
     response = client.post(
-        "/api/v1/interventions",
+        "/api/v1/inspections",
         json={"host_serial_code": "TIDAK-ADA-SERIAL-CODE-INI"},
     )
     assert response.status_code == 404
     assert response.json()["status"] == "NOT_FOUND"
 
 
-def test_intervention_endpoint_tanpa_host_serial_code_ditolak(client):
-    response = client.post("/api/v1/interventions", json={})
+def test_inspection_endpoint_tanpa_host_serial_code_ditolak(client):
+    response = client.post("/api/v1/inspections", json={})
     assert response.status_code == 422

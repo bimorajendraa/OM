@@ -26,13 +26,9 @@ class HealthResponse(BaseModel):
     batch_cache: dict
 
 
-class InterventionRequest(BaseModel):
+class InspectionRequest(BaseModel):
     """Satu perbaikan yang dilaporkan aplikasi eksternal/teknisi terhadap
-    satu PART - lihat docs/DECISIONS.md §28. Diidentifikasi lewat
-    `host_serial_code` (label fisik PART, BUKAN alert_id internal - aplikasi
-    eksternal tidak pernah tahu alert_id). Tidak ada field lain - satu POST
-    di sini SUDAH BERARTI satu perbaikan terjadi, waktunya diambil dari saat
-    server menerima request."""
+    satu PART, diidentifikasi lewat `host_serial_code`."""
 
     model_config = _CONFIG
 
@@ -41,13 +37,13 @@ class InterventionRequest(BaseModel):
     )
 
 
-class InterventionResult(BaseModel):
+class InspectionResult(BaseModel):
     model_config = _CONFIG
 
-    intervention_id: int
+    inspection_id: int
     item_id: str
     cycle_id: str
-    intervention_seq: int
+    inspection_seq: int
     alert_id: int | None
     performed_at: str
     created_at: str
@@ -57,11 +53,11 @@ class AlertResult(BaseModel):
     model_config = _CONFIG
 
     alert_id: int
-    terminal_id: str | None
+    terminal_serial_code: str | None
     part_type: str | None
     item_id: str
     cycle_id: str
-    intervention_seq: int
+    inspection_seq: int
     status: Literal["OPEN", "ACKNOWLEDGED", "RESOLVED", "SUPPRESSED"]
     opened_at: str
     opened_score: float
@@ -70,10 +66,10 @@ class AlertResult(BaseModel):
     suppression_until: str | None
 
 
-class InterventionResponse(BaseModel):
+class InspectionResponse(BaseModel):
     model_config = _CONFIG
 
-    intervention: InterventionResult
+    inspection: InspectionResult
     alert: AlertResult | None = Field(
         description="Alert yang ikut di-RESOLVE, kalau item ini sedang punya alert OPEN. null kalau tidak ada."
     )

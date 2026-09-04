@@ -24,8 +24,8 @@ from partrisk.serving import batch as serving_batch
 from partrisk.serving.single import ModelUnavailable, PartNotFound
 from partrisk.api.schemas import (
     HealthResponse,
-    InterventionRequest,
-    InterventionResponse,
+    InspectionRequest,
+    InspectionResponse,
 )
 
 
@@ -178,7 +178,7 @@ def health(check_database: bool = False) -> dict:
     }
 
 
-interventions_router = APIRouter(prefix="/api/v1", tags=["interventions"])
+inspections_router = APIRouter(prefix="/api/v1", tags=["inspections"])
 
 
 def _stringify_datetimes(row: dict) -> dict:
@@ -188,26 +188,11 @@ def _stringify_datetimes(row: dict) -> dict:
     }
 
 
-@interventions_router.post("/interventions", response_model=InterventionResponse)
-def record_intervention(payload: InterventionRequest) -> dict:
-    """Catat satu perbaikan terhadap satu PART - jalur MANUAL untuk tindakan
-    yang TIDAK PERNAH masuk data operasional (mis. sekadar mengencangkan
-    baut). Kalau perbaikannya berupa work order corrective/preventive yang
-    berakhir dismantle, itu sudah tercatat di data operasional dan alert
-    mati SENDIRI (jalur otomatis, lihat
-    predictive/alerts.py::auto_resolve_closed_cycles()) - endpoint ini
-    tidak perlu dipanggil untuk kasus itu.
-
-    Diidentifikasi lewat `host_serial_code` (label fisik PART), BUKAN
-    alert_id internal - aplikasi eksternal tidak pernah tahu alert_id (tidak
-    ada GET /alerts, lihat docs/DECISIONS.md §26/§28). Kalau PART ini SEDANG
-    punya alert OPEN, alert itu ikut di-RESOLVE; kalau tidak, intervention
-    tetap dicatat (satu POST SUDAH BERARTI satu perbaikan terjadi) tanpa
-    ada alert yang ditutup. `performed_at` diambil dari waktu server
-    menerima request, TIDAK ada idempotency key eksternal - retry akan
-    membuat baris intervention baru (docs/DECISIONS.md §28, trade-off
-    disetujui eksplisit demi kesederhanaan body request).
-    """
+@inspections_router.post("/inspections", response_model=InspectionResponse)
+def record_inspection(payload: InspectionRequest) -> dict:
+    """Catat satu perbaikan terhadap satu PART, diidentifikasi lewat
+    `host_serial_code`. Kalau PART ini sedang punya alert OPEN, alert itu
+    ikut di-RESOLVE; kalau tidak, inspection tetap dicatat tanpa alert."""
     item_id = data_reader.resolve_item_by_host_serial_code(payload.host_serial_code)
     if item_id is None:
         raise PartNotFound(
@@ -216,16 +201,15 @@ def record_intervention(payload: InterventionRequest) -> dict:
         )
     result = alert_engine.resolve_by_item(item_id, pd.Timestamp.now(tz="UTC"))
     return {
-        "intervention": _stringify_datetimes(result["intervention"]),
+        "inspection": _stringify_datetimes(result["inspection"]),
         "alert": _stringify_datetimes(result["alert"]) if result["alert"] else None,
     }
 
 
 DESCRIPTION = """
-API predictive maintenance - satu-satunya endpoint publik yang dibutuhkan
-aplikasi eksternal adalah `POST /api/v1/interventions` (docs/DECISIONS.md
-§28/§29). Tidak ada endpoint GET untuk data prediksi/rekomendasi/terminal -
-aplikasi eksternal baca schema `predictive` langsung dari database.
+API predictive maintenance - satu-satunya endpoint publik adalah
+`POST /api/v1/inspections`. Tidak ada endpoint GET - aplikasi eksternal
+baca schema `predictive` langsung dari database.
 """
 
 
@@ -266,7 +250,7 @@ if CORS_ALLOW_ORIGINS:
     )
 
 app.include_router(health_router)
-app.include_router(interventions_router, dependencies=[Depends(require_api_key)])
+app.include_router(inspections_router, dependencies=[Depends(require_api_key)])
 
 
 @app.exception_handler(PartNotFound)

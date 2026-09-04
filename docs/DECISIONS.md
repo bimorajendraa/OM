@@ -1473,3 +1473,242 @@ langsung terhadap database nyata untuk membuktikan jalur yang dipertahankan
 benar-benar masih berfungsi, bukan cuma lolos test unit.
 
 ---
+
+## 30 · `item_cycle` dihapus - cycle dibaca langsung, concurrency via advisory lock
+
+**Status**: berlaku, 2026-09-04. SUPERSEDED sebagian dari §25 (`item_cycle`
+sebagai tabel mirror lokal) dan referensi FK ke tabel itu di §26/§28.
+
+**Pertanyaan user**: kenapa `item_cycle` perlu ada sebagai tabel terpisah,
+padahal isinya cuma salinan data operasional (`core.data_reader.
+get_cycles()`) yang sudah bisa dibaca langsung? Alasan performa yang
+sempat saya kemukakan (hindari query berulang ke database bersama)
+**ditarik kembali** - volume operasi alert di sistem ini kecil (~1/bulan,
+lihat §11), jadi query berulang bukan masalah nyata. Alasan yang TERSISA
+cuma satu, teknis dan tidak bisa dihindari: `SELECT ... FOR UPDATE` (dipakai
+mengunci baris saat menghitung `inspection_seq` berikutnya, mencegah dua
+penulis bersamaan dapat nomor urut yang sama) **tidak bisa dilakukan** di
+koneksi read-only (`core/data_reader.py` memaksa
+`default_transaction_read_only=on`) - butuh baris di schema `predictive`
+yang bisa dikunci.
+
+**Solusi yang menghilangkan alasan itu juga**: Postgres punya **advisory
+lock** (`pg_advisory_xact_lock(hashtext(item_id))`) - kunci transaksional
+berdasarkan nilai apa pun (di sini: `item_id`), TIDAK butuh baris/tabel
+untuk digantungi sama sekali, otomatis lepas saat transaksi commit/rollback.
+Dengan ini, satu-satunya kebutuhan tabel mirror (baris untuk dikunci) hilang
+- `item_cycle` jadi genuinely tidak diperlukan lagi.
+
+**Implementasi**:
+- `migrations/predictive/0002_lifecycle.sql` diedit langsung (bukan migrasi
+  DROP baru - tabel ini belum pernah menampung data production, sama
+  seperti alasan §25/§28) - `CREATE TABLE predictive.item_cycle` dan
+  index-nya dibuang seluruhnya.
+- `predictive/cycles.py` ditulis ulang: `sync_item_cycles()` dihapus.
+  `ensure_active_cycle(item_id)` sekarang memanggil `data_reader.
+  get_cycles(item_id, data_end)` LANGSUNG dan mengambil baris `is_active`
+  dari situ, tanpa menulis apa pun - kontrak fungsinya (return dict yang
+  sama, raise `ItemNotInstalled` kalau tidak ada) TIDAK berubah, supaya
+  caller (`interventions.py`/`alerts.py`, sekarang `inspections.py`, §31)
+  tidak perlu diubah selain jalur lock-nya. Fungsi baru `cycle_status(item_id,
+  cycle_id)` - status SATU cycle tertentu (dipakai `_auto_resolve_if_cycle_
+  closed()` untuk cek apakah cycle sebuah alert sudah tertutup), dan
+  `lock_item(cur, item_id)` - wrapper tipis `pg_advisory_xact_lock`.
+- Semua `SELECT cycle_id FROM predictive.item_cycle WHERE cycle_id = %s
+  FOR UPDATE` (di `interventions.py`/`alerts.py::evaluate_and_open()`/
+  `resolve_with_intervention()`) diganti `cycle_store.lock_item(cur, item_id)`
+  - kunci per-ITEM (bukan per-cycle_id seperti sebelumnya) - lebih longgar
+  cakupannya (satu item cuma punya satu cycle aktif kapan pun, jadi
+  mengunci per-item sama amannya, malah lebih sederhana).
+- `predictive.intervention.cycle_id`/`predictive.alert.cycle_id` (nama
+  saat itu, lihat §31 untuk rename) berhenti jadi `REFERENCES predictive.
+  item_cycle (cycle_id)` - jadi TEXT biasa. Integritas `cycle_id` yang
+  ditulis dijamin KODE (selalu dari `ensure_active_cycle()`), bukan lagi
+  constraint database - trade-off yang diterima karena FK itu satu-satunya
+  konsumen `item_cycle` selain locking, dan kode yang menulisnya sudah
+  tunggal (`inspections.py::record_inspection()`,
+  `alerts.py::evaluate_and_open()`/`resolve_with_inspection()`).
+
+**Kolom `terminal_id` DIGANTI NAMA jadi `terminal_serial_code`** (di
+`item_prediction` dan `alert`) - permintaan eksplisit user, sejalan dengan
+isi kolom itu yang SUDAH diubah §28 jadi serial code (bukan lagi ID
+internal) tapi namanya belum ikut disesuaikan saat itu. Migration diedit
+langsung (alasan sama - belum ada data production), kolom `AlertResult.
+terminal_id` (schemas.py) ikut di-rename `terminal_serial_code`.
+
+**Yang TIDAK berubah**: `item_cycle` HANYALAH cermin, bukan sumber
+kebenaran - itu tetap benar setelah tabelnya dihapus, sekarang malah lebih
+langsung (baca dari sumbernya tiap saat, tidak ada jeda "belum sempat
+sinkron"). Format `cycle_id` (`"<item_id>:<urutan>"`, reuse
+`installation_cycle_id` operasional apa adanya) TIDAK berubah.
+
+**Verifikasi**: `pytest -q` penuh lolos (89 lulus, 1 skip) setelah
+penghapusan tabel + migrasi ulang skema live (`ALTER TABLE ... RENAME
+COLUMN`, `DROP TABLE item_cycle`, `DROP CONSTRAINT` FK lama) dijalankan
+manual terhadap database yang sama supaya skema live cocok persis dengan
+migration file yang baru (tidak menunggu migrasi ulang dari nol).
+
+---
+
+## 31 · "intervention" diganti nama jadi "inspection" - istilah saja, arti tidak berubah
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user (penamaan
+terasa kurang pas) - dikonfirmasi lewat klarifikasi: (1) artinya TETAP
+"ada perbaikan yang terjadi" (bukan berubah jadi "sekadar diperiksa" -
+makna "inspection" secara harfiah), (2) cakupannya SEMUA tempat (tabel,
+kolom, modul Python, endpoint API, dokumentasi), bukan cuma yang terlihat
+user luar.
+
+**Kenapa dicatat eksplisit "arti tidak berubah"**: "inspection" secara
+harfiah biasanya berarti "diperiksa" (belum tentu diperbaiki) - beda dari
+"intervention" (ada tindakan/perbaikan). User mengonfirmasi ini SENGAJA
+tetap berarti "ada perbaikan" - kalau nanti ada kebingungan dari
+pembaca kode/dokumentasi baru soal ini, itu bukan bug, itu keputusan
+penamaan yang sudah dikonfirmasi.
+
+**Rename lengkap**:
+- Tabel `predictive.intervention` -> `predictive.inspection`; kolom
+  `intervention_id` -> `inspection_id`, `intervention_seq` -> `inspection_seq`
+  (di tabel `inspection`, `alert`, DAN `item_prediction` - satu konsep yang
+  sama, muncul di tiga tabel). Constraint `fk_intervention_alert` ->
+  `fk_inspection_alert`, index `ix_intervention_item`/`ix_intervention_cycle`
+  -> `ix_inspection_item`/`ix_inspection_cycle`. `migrations/predictive/
+  0001_init.sql`/`0002_lifecycle.sql`/`0003_alerts.sql` diedit langsung
+  (alasan sama seperti §25/§28/§30 - belum ada data production), skema
+  live di-`ALTER`/`RENAME` manual supaya cocok persis.
+- Modul `src/partrisk/predictive/interventions.py` -> `inspections.py`
+  (file baru dibuat, file lama dihapus - bukan `git mv`, tapi isinya
+  identik selain rename). `record_intervention()` -> `record_inspection()`.
+- `predictive/alerts.py`: `resolve_with_intervention()` ->
+  `resolve_with_inspection()`, `_next_intervention_seq()` ->
+  `_next_inspection_seq()`, import `interventions` -> `inspections`, kunci
+  dict hasil (`{"intervention": ..., "alert": ...}`) -> `{"inspection": ...,
+  "alert": ...}` (dipakai `resolve_by_item()` dan endpoint API), nilai
+  `resolution_reason='INTERVENTION_RECORDED'` -> `'INSPECTION_RECORDED'`.
+- `api/schemas.py`: `InterventionRequest`/`InterventionResult`/
+  `InterventionResponse` -> `InspectionRequest`/`InspectionResult`/
+  `InspectionResponse`, field `AlertResult.intervention_seq` ->
+  `inspection_seq`, field respons `intervention` -> `inspection`.
+- `api/app.py`: router `interventions_router` -> `inspections_router`,
+  endpoint pindah dari `POST /api/v1/interventions` ke `POST /api/v1/
+  inspections`, fungsi `record_intervention()` -> `record_inspection()`.
+- Semua docstring/komentar yang menyebut "intervention" sebagai istilah
+  ikut diganti "inspection" - KECUALI beberapa catatan historis eksplisit
+  ("SEBELUMNYA disebut intervention") yang sengaja dipertahankan supaya
+  pembaca yang menemukan referensi lama (docs §19-§29 di atas, ditulis
+  SEBELUM rename ini, TIDAK diedit sesuai konvensi append-only) tidak
+  bingung kenapa istilahnya beda.
+
+**Yang TIDAK berubah**: seluruh logic/behavior - satu POST tetap berarti
+satu perbaikan terjadi, dua jalur resolve (otomatis §27, manual di sini)
+tetap sama persis, `inspection_seq` tetap mekanisme identitas
+episode/concurrency yang sama (§16). Ini murni rename, dikonfirmasi
+eksplisit oleh user sebelum dikerjakan (lihat pertanyaan klarifikasi di
+atas) - bukan perubahan desain.
+
+**Verifikasi**: `pytest -q` penuh lolos (89 lulus, 1 skip) setelah rename
+menyeluruh + migrasi skema live dijalankan manual. `grep -rni intervention
+src/ tests/ migrations/` hanya menyisakan komentar "SEBELUMNYA disebut
+intervention" yang disengaja - tidak ada nama tabel/kolom/fungsi/endpoint
+aktif yang masih memakai istilah lama.
+
+---
+
+## 32 · `alert.prediction_id` benar-benar ditautkan - satu prediction menghasilkan NOL atau SATU alert
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user: "Satu prediction
+boleh tidak menghasilkan alert sama sekali, atau maksimal menghasilkan satu
+alert" - mengoreksi §26 yang mencatat `alert.prediction_id` "selalu NULL...
+informasional saja" sebagai gap yang diterima.
+
+**Masalah**: `evaluate_and_open()` memproses `frame` (satu baris per PART
+per run scoring) dan membuka ALERT PALING BANYAK SATU per baris yang
+diproses (lewat pengecekan "sudah ada alert OPEN untuk episode ini?") -
+jadi invariant "0 atau 1 alert per prediction" SEBENARNYA sudah berlaku
+lewat alur kode, tapi tidak pernah DIBUKTIKAN/DITEGAKKAN lewat data,
+karena `alert.prediction_id` tidak pernah diisi (`record_predictions()`
+pakai `executemany` tanpa `RETURNING` per baris, jadi `prediction_id` per
+item tidak pernah diambil balik).
+
+**Implementasi** (`predictive/scoring.py`, `predictive/alerts.py`):
+- `scoring.py::prediction_ids_for_run(run_id)` - fungsi baru, query
+  terpisah `SELECT item_id, prediction_id FROM predictive.item_prediction
+  WHERE run_id = %s` setelah `record_predictions()` selesai. Sengaja query
+  TERPISAH (bukan `executemany(..., returning=True)` di dalam
+  `record_predictions()`) supaya kontrak fungsi itu TIDAK berubah - lebih
+  surgical, tidak menyentuh kode yang sudah benar.
+- `run_and_persist()`: setelah `record_predictions()`, panggil
+  `prediction_ids_for_run(run_id)` dan tempelkan hasilnya ke
+  `scores.frame["prediction_id"]` (map by item_id) SEBELUM memanggil
+  `evaluate_and_open()`.
+- `evaluate_and_open()`: baca `row["prediction_id"]` per PART yang
+  diproses, sertakan di INSERT `predictive.alert`.
+- Migration `0003_alerts.sql`: `CREATE UNIQUE INDEX ux_alert_one_per_prediction
+  ON predictive.alert (prediction_id) WHERE prediction_id IS NOT NULL` -
+  NULL tetap boleh berulang (alert sintetis di test, atau alert yang
+  dibuka SEBELUM perbaikan ini berjalan), tapi begitu `prediction_id`
+  terisi, database sendiri yang menolak kalau ada yang mencoba
+  memasangkan alert kedua ke prediction yang sama - bukan cuma dijamin
+  oleh urutan kode `evaluate_and_open()`.
+
+**Verifikasi**: dua test baru di `tests/test_predictive.py` -
+`test_prediction_ids_for_run_memetakan_item_id_ke_prediction_id` (lookup
+balik ke `item_prediction.prediction_id` yang sungguhan) dan
+`test_evaluate_and_open_menautkan_alert_ke_prediction_id` (buka alert
+lewat `evaluate_and_open()` dengan `prediction_id` di frame, buktikan
+`alert.prediction_id` yang tersimpan cocok). `pytest -q` penuh lolos (91
+lulus, 1 skip).
+
+---
+
+## 33 · Kolom yang tidak pernah ditulis dan tidak akan ditulis dibuang - `acknowledged_at`, status `ACKNOWLEDGED`/`SUPPRESSED`, `item_prediction.cycle_id`/`inspection_seq`
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user: "tolong
+bersihkan yang sudah tidak digunakan dan tidak akan digunakan" - dipicu
+pertanyaan "resolution_reason dapet darimana?" yang mendorong audit
+menyeluruh kolom mana yang benar-benar ditulis/dibaca kode, bukan cuma
+ada di schema karena disediakan dari master prompt awal.
+
+**Audit** (dicatat supaya alasan hapusnya jelas kalau ditanya lagi
+nanti):
+- `resolution_reason` - **BUKAN dead**, tetap dipertahankan. Ditulis oleh
+  dua jalur nyata (`_auto_resolve_if_cycle_closed()`:
+  `f"OPERATIONAL_CYCLE_CLOSED:{end_reason}"`, `resolve_with_inspection()`:
+  `'INSPECTION_RECORDED'`) - TIDAK pernah dibaca balik oleh kode kita
+  sendiri, tapi itu memang tujuannya: field informasional untuk manusia/
+  aplikasi eksternal yang baca `predictive.alert` langsung, menjawab
+  "kenapa alert ini ditutup".
+- `alert.acknowledged_at` - **DEAD**, dibuang. Tidak ada satu baris kode
+  pun yang PERNAH menulisnya - tidak ada endpoint/fungsi "acknowledge"
+  yang pernah dibangun (dicatat sebagai gap terbuka sejak §26, tidak
+  pernah ditindaklanjuti).
+- Status `ACKNOWLEDGED` (di `CHECK` constraint `alert.status`) - **DEAD**,
+  dibuang. Konsekuensi langsung dari `acknowledged_at` tidak pernah
+  dipakai - tidak ada jalur kode yang pernah men-set status ke nilai ini.
+- Status `SUPPRESSED` - **DEAD**, dibuang. Mekanisme suppression yang
+  SUNGGUHAN berjalan (§24/§25) bekerja lewat kolom `suppression_until`
+  pada alert yang SUDAH RESOLVED (dibaca `_active_suppression()` untuk
+  menahan pembukaan alert BARU) - bukan lewat mengubah `status` alert lama
+  jadi `'SUPPRESSED'`. Nilai CHECK constraint ini sekadar warisan skema
+  awal yang tidak pernah benar-benar dipakai jalur manapun.
+- `item_prediction.cycle_id`/`item_prediction.inspection_seq` - **DEAD**,
+  dibuang. Ada di migration sejak Milestone 4 dengan catatan "NULL sampai
+  intervensi tercatat", tapi `record_predictions()`/`_PREDICTION_COLUMNS`
+  TIDAK PERNAH memasukkan dua kolom ini ke INSERT - selalu NULL sejak
+  awal, tidak ada jalur kode yang pernah mengisinya. `alert.prediction_id`
+  (§32) sekarang jadi cara resmi menautkan alert ke baris prediksi yang
+  memicunya - dua kolom ini di `item_prediction` jadi genuinely redundan
+  bahkan kalau MAU diisi.
+
+`status` sekarang `CHECK (status IN ('OPEN', 'RESOLVED'))` (sebelumnya 4
+nilai). Migration diedit langsung (bukan `ALTER` baru) untuk ketiganya -
+alasan sama seperti §25/§28/§30/§31: belum ada data production di tabel
+ini. Skema live disesuaikan manual (`DROP COLUMN`, `DROP CONSTRAINT` +
+`ADD CONSTRAINT` versi baru) supaya cocok persis dengan migration file.
+
+**Verifikasi**: `pytest -q` penuh lolos (91 lulus, 1 skip, tidak ada test
+yang pernah merujuk kolom yang dibuang - dikonfirmasi lewat grep sebelum
+menghapus). Skema live diverifikasi cocok persis dengan migration file
+lewat `information_schema.columns`/`pg_get_constraintdef()`.
+
+---
