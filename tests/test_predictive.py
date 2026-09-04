@@ -125,6 +125,34 @@ def test_record_predictions_append_only_tidak_menimpa_baris_lama(cleanup_run_ids
     assert count == 2, "dua kali record_predictions harus menghasilkan dua baris (append-only), bukan menimpa"
 
 
+def _valid_prediction_row(item_id: str = "TEST-ITEM-GUARD") -> dict:
+    return {
+        "item_id": item_id, "terminal_label": None, "item_model_code": "0000000",
+        "failure_probability_30d": 0.1, "failure_probability_60d": 0.2,
+        "failure_probability_90d": 0.3, "failure_probability_120d": 0.4,
+        "failure_risk_level": "LOW", "gate_flagged": False,
+    }
+
+
+def test_record_predictions_menolak_frame_kosong():
+    with pytest.raises(RuntimeError, match="kosong"):
+        scoring.record_predictions(1, pd.DataFrame(), "test-model-v0", pd.Timestamp.now(tz="UTC"))
+
+
+def test_record_predictions_menolak_item_id_duplikat():
+    frame = pd.DataFrame([_valid_prediction_row(), _valid_prediction_row()])
+    with pytest.raises(RuntimeError, match="duplikat"):
+        scoring.record_predictions(1, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+
+
+def test_record_predictions_menolak_probabilitas_nan():
+    row = _valid_prediction_row()
+    row["failure_probability_60d"] = float("nan")
+    frame = pd.DataFrame([row])
+    with pytest.raises(RuntimeError, match="NaN"):
+        scoring.record_predictions(1, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+
+
 @needs_database
 def test_prediction_ids_for_run_memetakan_item_id_ke_prediction_id(cleanup_run_ids):
     """docs/DECISIONS.md §32 - dipakai run_and_persist() menautkan
@@ -161,6 +189,36 @@ def test_prediction_ids_for_run_memetakan_item_id_ke_prediction_id(cleanup_run_i
             )
             (expected_id,) = cur.fetchone()
     assert mapping["TEST-ITEM-011"] == expected_id
+
+
+@needs_database
+@needs_models
+def test_run_and_persist_selesai_succeeded_setelah_alert_diproses(cleanup_run_ids):
+    """model_run.status TIDAK boleh SUCCEEDED sebelum evaluate_and_open()
+    ikut selesai - lihat WHY di scoring.py::run_and_persist()."""
+    result = scoring.run_and_persist()
+    cleanup_run_ids.append(result["run_id"])
+
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, row_count, completed_at FROM predictive.model_run WHERE run_id = %s",
+                (result["run_id"],),
+            )
+            status, row_count, completed_at = cur.fetchone()
+    assert status == "SUCCEEDED"
+    assert completed_at is not None
+    assert row_count == result["row_count"]
+    assert isinstance(result["opened_alert_ids"], list)
+
+    if result["opened_alert_ids"]:
+        with predictive_db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM predictive.alert WHERE alert_id = ANY(%s)",
+                    (result["opened_alert_ids"],),
+                )
+            conn.commit()
 
 
 @pytest.fixture
@@ -487,3 +545,52 @@ def test_resolve_by_item_tanpa_alert_open_tetap_mencatat_inspection(
     assert result["alert"] is None
     assert result["inspection"]["item_id"] == scorable_item
     assert result["inspection"]["alert_id"] is None
+
+
+@needs_database
+@needs_models
+def test_resolve_by_item_dengan_external_event_id_sama_tidak_duplikat(
+    scorable_item, cleanup_item_lifecycle
+):
+    """Retry aplikasi eksternal (mis. setelah timeout) memakai
+    external_event_id yang sama - harus mengembalikan inspection yang SAMA,
+    bukan membuat baris baru."""
+    cleanup_item_lifecycle.append(scorable_item)
+    external_event_id = f"retry-test-{scorable_item}-{pd.Timestamp.now().value}"
+
+    first = alert_engine.resolve_by_item(
+        scorable_item, pd.Timestamp.now(tz="UTC"), external_event_id
+    )
+    second = alert_engine.resolve_by_item(
+        scorable_item, pd.Timestamp.now(tz="UTC"), external_event_id
+    )
+
+    assert first["inspection"]["inspection_id"] == second["inspection"]["inspection_id"]
+
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM predictive.inspection WHERE external_event_id = %s",
+                (external_event_id,),
+            )
+            count = cur.fetchone()[0]
+    assert count == 1, "external_event_id yang sama dikirim ulang tidak boleh membuat baris kedua"
+
+
+@needs_database
+@needs_models
+def test_resolve_by_item_dengan_external_event_id_berbeda_tetap_dua_inspection(
+    scorable_item, cleanup_item_lifecycle
+):
+    """external_event_id BERBEDA berarti perbaikan BERBEDA - keduanya harus
+    tercatat, idempotency tidak boleh menelan inspection yang sah."""
+    cleanup_item_lifecycle.append(scorable_item)
+
+    first = alert_engine.resolve_by_item(
+        scorable_item, pd.Timestamp.now(tz="UTC"), f"evt-a-{scorable_item}"
+    )
+    second = alert_engine.resolve_by_item(
+        scorable_item, pd.Timestamp.now(tz="UTC"), f"evt-b-{scorable_item}"
+    )
+
+    assert first["inspection"]["inspection_id"] != second["inspection"]["inspection_id"]

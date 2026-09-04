@@ -351,6 +351,36 @@ def test_get_cycles_tidak_membiarkan_part_yang_sudah_dilepas_tetap_aktif():
     assert active["item_identifier_clean"].map(latest_status).eq("INSTALLED").all()
 
 
+@needs_database
+def test_as_of_membatasi_seluruh_pembacaan_ke_boundary_yang_sama():
+    """Satu batch scoring run harus melihat SATU potret data operasional yang
+    konsisten (docs/DECISIONS.md) - get_events/get_terminal_context/
+    get_failure_episodes/get_cycles semuanya dibatasi `as_of`/
+    `dataset_max_event_on` yang sama, bukan membaca live tanpa batas."""
+    latest = data_reader.get_dataset_max_event_on()
+    events_all = data_reader.get_events()
+    cutoff = events_all["created_on"].sort_values().iloc[len(events_all) // 2]
+
+    bounded_events = data_reader.get_events(as_of=cutoff)
+    assert (bounded_events["created_on"] <= cutoff).all()
+    assert len(bounded_events) < len(events_all), (
+        "as_of di tengah rentang data harus benar-benar memotong sebagian baris"
+    )
+
+    bounded_episodes = data_reader.get_failure_episodes(as_of=cutoff)
+    assert (bounded_episodes["failure_onset_on"] <= cutoff).all()
+
+    bounded_terminal = data_reader.get_terminal_context(as_of=cutoff)
+    assert (bounded_terminal["installed_on"] <= cutoff).all()
+
+    bounded_cycles = data_reader.get_cycles(dataset_max_event_on=cutoff)
+    assert (bounded_cycles["installed_on"] <= cutoff).all()
+
+    # Tanpa as_of (default None) - perilaku lama tetap utuh, tidak dibatasi.
+    unbounded_cycles = data_reader.get_cycles()
+    assert unbounded_cycles["dataset_max_event_on"].max() == latest
+
+
 def _synthetic(n: int = 1000, positive_rate: float = 0.05, seed: int = 0):
     rng = np.random.default_rng(seed)
     target = (rng.random(n) < positive_rate).astype(int)

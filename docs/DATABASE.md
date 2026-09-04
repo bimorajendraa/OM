@@ -60,11 +60,17 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
 
 predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, RENAME §31
   inspection_id, item_id, cycle_id, inspection_seq (UNIK per cycle),
-  alert_id (nullable), performed_at, created_at
+  alert_id (nullable), external_event_id (nullable, UNIK - §37),
+  performed_at, created_at
   UNIQUE(cycle_id, inspection_seq)
-  -- Sengaja TIDAK ADA outcome/action_code/remark/external_* (dibuang §28) -
-  -- body POST /api/v1/inspections cuma host_serial_code, tidak ada apa pun
-  -- lain untuk diisi ke kolom itu. Tidak ada lagi idempotency eksternal.
+  UNIQUE(external_event_id)
+  -- Sengaja TIDAK ADA outcome/action_code/remark (dibuang §28) - body
+  -- POST /api/v1/inspections cuma host_serial_code + external_event_id
+  -- opsional, tidak ada apa pun lain untuk diisi ke kolom itu.
+  -- external_event_id (§37) - idempotency key OPSIONAL dari aplikasi
+  -- pemanggil, dipakai mencegah inspection duplikat kalau request di-retry
+  -- (mis. timeout). NULL diperbolehkan berkali-kali (Postgres UNIQUE tidak
+  -- membatasi NULL berulang).
   -- cycle_id BUKAN FK (tabel item_cycle dihapus §30) - lihat "Cycle" di
   -- bawah untuk cara cycle dibaca sekarang.
 

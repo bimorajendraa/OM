@@ -9,7 +9,7 @@ from partrisk.predictive import db
 
 _COLUMNS = (
     "inspection_id", "item_id", "cycle_id", "inspection_seq", "alert_id",
-    "performed_at", "created_at",
+    "external_event_id", "performed_at", "created_at",
 )
 
 _SELECT_COLUMNS = ", ".join(_COLUMNS)
@@ -19,10 +19,24 @@ def _row_to_dict(row) -> dict:
     return dict(zip(_COLUMNS, row))
 
 
+def find_by_external_event_id(external_event_id: str) -> dict | None:
+    """Idempotency lookup, dipakai `alerts.resolve_by_item()`."""
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM predictive.inspection "
+                "WHERE external_event_id = %s",
+                (external_event_id,),
+            )
+            row = cur.fetchone()
+    return None if row is None else _row_to_dict(row)
+
+
 def record_inspection(
     item_id: str,
     performed_at: pd.Timestamp,
     alert_id: int | None = None,
+    external_event_id: str | None = None,
 ) -> dict:
     """Catat satu inspection untuk `item_id`, dalam cycle aktifnya saat ini."""
     cycle = cycle_store.ensure_active_cycle(item_id)
@@ -44,11 +58,11 @@ def record_inspection(
             cur.execute(
                 f"""
                 INSERT INTO predictive.inspection
-                    (item_id, cycle_id, inspection_seq, alert_id, performed_at)
-                VALUES (%s, %s, %s, %s, %s)
+                    (item_id, cycle_id, inspection_seq, alert_id, external_event_id, performed_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING {_SELECT_COLUMNS}
                 """,
-                (cycle["item_id"], cycle_id, next_seq, alert_id, performed_at_value),
+                (cycle["item_id"], cycle_id, next_seq, alert_id, external_event_id, performed_at_value),
             )
             row = cur.fetchone()
         conn.commit()

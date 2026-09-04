@@ -1915,3 +1915,117 @@ dev sesudah penghapusan kode mati, sekali lagi di venv kosong baru
 file - keduanya lolos penuh.
 
 ---
+
+## 37 · Empat gap flow logic nyata diperbaiki (audit ulang repo terhadap master-prompt anti-over-engineering)
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user: audit ulang
+repo dari awal terhadap flow yang diinginkan (operational data -> lifecycle
+-> features -> prediction -> gate -> alert -> inspection -> resolve),
+dengan batasan keras: JANGAN over-engineering, JANGAN infrastruktur baru
+(Redis/Kafka/mirror DB/dst), hanya perbaiki gap NYATA yang masih ada di
+kode terbaru.
+
+**Gap 1 - pembacaan scoring tidak point-in-time consistent**: `get_cycles`/
+`get_events`/`get_failure_episodes`/`get_terminal_context` dijalankan
+KONKUREN (ThreadPoolExecutor) tanpa batas waktu bersama - kalau ada
+tulisan operasional baru masuk di tengah batch, satu query bisa melihatnya
+sementara query lain tidak, menghasilkan snapshot cycles/events/episodes/
+terminal yang tidak konsisten dalam satu scoring run. `get_cycles()` sudah
+punya param `dataset_max_event_on` tapi cuma dipakai untuk hitung
+`cycle_end_on`, BUKAN sebagai filter baris.
+
+**Perbaikan**: `core/data_reader.py::_chain_sql()` dapat param `as_of`
+(bool) - kalau True, menambah `AND j.created_on <= %s` di CTE `event`
+(fondasi bersama SEMUA fungsi baca). `get_events()`/`get_terminal_context()`/
+`get_failure_episodes()` dapat param baru `as_of: pd.Timestamp | None`;
+`get_cycles()`'s `dataset_max_event_on` sekarang JUGA dipakai sebagai
+filter baris (dulu cuma nilai boundary), bukan hanya saat `item_id`
+diberikan. `serving/batch.py::_fetch_batch_inputs()` sekarang mengambil
+`data_end` SEKALI (`current_data_end()`) SEBELUM memanggil keempat fungsi
+baca secara konkuren, meneruskan nilai yang SAMA ke semuanya - `_compute()`
+tidak lagi menurunkan `data_end` belakangan dari `cycles["dataset_max_event_on"].max()`.
+
+**Kenapa bukan solusi besar**: tidak ada snapshot table/staging DB baru -
+cuma satu parameter `as_of` yang disebar ke fungsi baca yang sudah ada,
+dan satu pemanggilan `current_data_end()` dipindah ke awal. Perilaku LAMA
+(tanpa `as_of`, unbounded) tetap jadi default untuk pemanggil ad-hoc
+(CLI/tests) yang tidak butuh boundary eksplisit.
+
+**Gap 2 - `model_run` bisa ditandai SUCCEEDED sebelum alert selesai
+diproses**: di `predictive/scoring.py::run_and_persist()`,
+`complete_run()` (status -> SUCCEEDED) dipanggil SEBELUM
+`alert_engine.evaluate_and_open()`, dan pemanggilan itu ada DI LUAR
+try/except - kalau `evaluate_and_open()` gagal, exception lolos tanpa
+pernah memanggil `fail_run()`, meninggalkan `model_run` PERMANEN berstatus
+SUCCEEDED padahal alert belum tentu selesai diproses.
+
+**Perbaikan**: urutan dalam try-block diubah jadi `record_predictions()` ->
+`evaluate_and_open()` -> `complete_run()` - `complete_run()` sekarang jadi
+langkah TERAKHIR sebelum return, dan `evaluate_and_open()` ikut tercakup
+try/except sehingga kegagalannya memicu `fail_run()` seperti seharusnya.
+Tidak ada job-monitoring service baru - tabel `model_run` yang sudah ada
+dipakai apa adanya, cuma urutan pemanggilannya yang diperbaiki.
+
+**Gap 3 - tidak ada idempotency di `POST /api/v1/inspections`**: retry
+aplikasi eksternal (timeout jaringan, respons hilang di tengah jalan) bisa
+membuat inspection duplikat untuk satu perbaikan fisik yang sama - lebih
+parah lagi kalau alert sudah ter-resolve dari percobaan pertama, retry
+jatuh ke cabang "tidak ada alert OPEN" di `resolve_by_item()` dan diam-diam
+menulis baris inspection kedua yang orphan (`alert_id=NULL`).
+
+**Perbaikan**: kolom `external_event_id TEXT` (opsional) + constraint
+`UNIQUE` ditambahkan ke `predictive.inspection` (migrasi 0002 diedit
+langsung + `ALTER TABLE` matching dijalankan manual ke DB live, konsisten
+dengan pola sesi ini karena tabel belum pernah menyimpan data produksi).
+`InspectionRequest.external_event_id` (opsional) diteruskan dari endpoint
+sampai ke `alerts.resolve_by_item()`, yang MENGECEK
+`inspections.find_by_external_event_id()` di awal SEBELUM melakukan apa
+pun - kalau sudah pernah tercatat, hasil yang SAMA langsung dikembalikan
+tanpa insert baru. Constraint `UNIQUE` di database adalah jaring pengaman
+terakhir (sesuai instruksi eksplisit: cukup constraint database, tidak
+perlu Redis/distributed lock/message broker) - request BENAR-BENAR
+konkuren (bukan retry berurutan setelah timeout, yang jauh lebih umum)
+masih bisa memicu error constraint mentah alih-alih replay yang mulus;
+trade-off ini diterima sengaja demi tetap sederhana.
+
+**Gap 4 - tidak ada guard sebelum prediction dipersist**:
+`scoring.record_predictions()` menulis apa pun yang diberikan tanpa
+pemeriksaan - frame kosong, `item_id` duplikat, atau probabilitas NaN bisa
+lolos ke `item_prediction` dan berpotensi memicu alert yang salah, diam-
+diam.
+
+**Perbaikan**: tiga guard clause sederhana (`_check_scores_before_persist()`)
+di awal `record_predictions()`, PERSIS seperti contoh di instruksi user -
+frame kosong/`item_id` duplikat/NaN di salah satu dari 4 kolom probabilitas
+sekarang me-raise `RuntimeError` SEBELUM baris apa pun ditulis ke database.
+Bukan platform data-quality baru - murni beberapa baris validasi di fungsi
+yang sudah ada.
+
+**Diperiksa TAPI TIDAK diubah** (evaluasi eksplisit diminta instruksi,
+kesimpulan: tidak ada gap nyata):
+- **Suppression/emergency override** (`alerts.py::_emergency_override()`):
+  sudah pakai `config.ALERT_EMERGENCY_SCORE_ABSOLUTE`/
+  `ALERT_EMERGENCY_SCORE_JUMP` (bukan hardcode), dan ambang absolut
+  (`0.80`) SUDAH PERSIS pola yang diminta instruksi ("score >= ambang ->
+  boleh buka emergency alert"). Aturan jump tambahan sudah ada sebelumnya
+  dan tetap dipakai config, bukan penambahan baru - tidak ada alasan kuat
+  untuk menghapusnya.
+- **Format `cycle_id`** (`item_id:N`): tidak ditemukan bukti data
+  operasional pernah menerima backfill historis terlambat (data journal
+  selalu bertambah kronologis) - sesuai instruksi eksplisit, DIBIARKAN.
+- **Inspection sebagai fitur ML**: dikonfirmasi TIDAK ADA di
+  `config.FEATURE_COLUMNS`/`DEGRADATION_FEATURES` - sesuai instruksi,
+  memang belum boleh ditambahkan sampai data historis cukup.
+- **Permukaan API**: sudah persis `/health` + `POST /api/v1/inspections`
+  saja (§29) - tidak ada endpoint lama yang perlu "dihidupkan lagi".
+
+**Verifikasi**: test baru ditambahkan untuk keempat gap (konsistensi
+`as_of` lintas `get_events`/`get_cycles`/`get_failure_episodes`/
+`get_terminal_context`; `run_and_persist()` SUCCEEDED hanya setelah alert
+diproses; idempotency `external_event_id` - dua kali retry sama-sama
+mengembalikan inspection yang sama TANPA baris kedua, sementara
+`external_event_id` berbeda tetap menghasilkan dua inspection; tiga guard
+clause data quality). `pytest -q` penuh dijalankan sesudah seluruh
+perubahan.
+
+---

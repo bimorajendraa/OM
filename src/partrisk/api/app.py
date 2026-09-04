@@ -199,7 +199,9 @@ def record_inspection(payload: InspectionRequest) -> dict:
             payload.host_serial_code,
             message=f"PART dengan serial code '{payload.host_serial_code}' tidak ditemukan.",
         )
-    result = alert_engine.resolve_by_item(item_id, pd.Timestamp.now(tz="UTC"))
+    result = alert_engine.resolve_by_item(
+        item_id, pd.Timestamp.now(tz="UTC"), payload.external_event_id
+    )
     return {
         "inspection": _stringify_datetimes(result["inspection"]),
         "alert": _stringify_datetimes(result["alert"]) if result["alert"] else None,

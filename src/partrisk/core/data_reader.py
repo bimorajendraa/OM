@@ -274,17 +274,19 @@ def _chain_sql(
     place_map: dict[str, str],
     *,
     single_item: bool,
+    as_of: bool = False,
     with_failures: bool = True,
 ) -> str:
-    item_filter = (
-        f"""WHERE COALESCE(
+    conditions = []
+    if single_item:
+        conditions.append(f"""COALESCE(
             {_clean('j.item_pairing_code')},
             {_clean('j.host_serial_code')},
             'JOURNEY#' || j.journey_id::text
-        ) = %s"""
-        if single_item
-        else ""
-    )
+        ) = %s""")
+    if as_of:
+        conditions.append("j.created_on <= %s")
+    item_filter = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     failure_cte = _FAILURE_CTE if with_failures else ""
     failure_flag = "f.journey_id IS NOT NULL" if with_failures else "FALSE"
@@ -353,6 +355,17 @@ operational AS MATERIALIZED (
 """
 
 
+def _chain_params(item_id: str | None, as_of: pd.Timestamp | None) -> tuple:
+    """Param tuple cocok urutan filter di `_chain_sql()`'s event CTE:
+    item_filter (%s) dulu, baru as_of filter (%s)."""
+    params: list = []
+    if item_id is not None:
+        params.append(_normalize(item_id))
+    if as_of is not None:
+        params.append(pd.Timestamp(as_of).to_pydatetime())
+    return tuple(params)
+
+
 _FAILURE_CTE = """
 failure_event AS MATERIALIZED (
     SELECT journey_id, item_identifier_clean, created_on AS failure_onset_on
@@ -408,11 +421,11 @@ WHERE {_valid_operational_date('j.created_on')}
         return pd.Timestamp(_query(conn, sql).iloc[0, 0])
 
 
-def get_events(item_id: str | None = None) -> pd.DataFrame:
+def get_events(item_id: str | None = None, as_of: pd.Timestamp | None = None) -> pd.DataFrame:
     with connect() as conn:
         client_map, place_map = _build_text_maps(conn)
         sql = (
-            _chain_sql(client_map, place_map, single_item=item_id is not None)
+            _chain_sql(client_map, place_map, single_item=item_id is not None, as_of=as_of is not None)
             + """
 SELECT journey_id, item_identifier_clean, created_on, wo_type_clean, status_clean,
        item_type_clean, is_failure_onset, place_canonical_clean, host_serial_code_clean
@@ -421,14 +434,16 @@ WHERE item_identifier_clean IS NOT NULL
 ORDER BY item_identifier_clean, created_on, journey_id
 """
         )
-        return _query(conn, sql, () if item_id is None else (_normalize(item_id),))
+        return _query(conn, sql, _chain_params(item_id, as_of))
 
 
-def get_terminal_context(item_id: str | None = None) -> pd.DataFrame:
+def get_terminal_context(
+    item_id: str | None = None, as_of: pd.Timestamp | None = None
+) -> pd.DataFrame:
     with connect() as conn:
         client_map, place_map = _build_text_maps(conn)
         sql = (
-            _chain_sql(client_map, place_map, single_item=item_id is not None)
+            _chain_sql(client_map, place_map, single_item=item_id is not None, as_of=as_of is not None)
             + f"""
 , parent_link AS MATERIALIZED (
     SELECT
@@ -469,7 +484,7 @@ FROM parent_link
 ORDER BY item_identifier_clean, installed_on, journey_id
 """
         )
-        return _query(conn, sql, () if item_id is None else (_normalize(item_id),))
+        return _query(conn, sql, _chain_params(item_id, as_of))
 
 
 def get_cycles(
@@ -480,9 +495,10 @@ def get_cycles(
     if item_id is not None and dataset_max_event_on is None:
         raise ValueError("dataset_max_event_on wajib diisi saat membaca satu item.")
 
+    as_of = dataset_max_event_on is not None
     boundary = (
         "SELECT %s::timestamp AS dataset_max_event_on"
-        if item_id is not None
+        if as_of
         else "SELECT MAX(created_on) AS dataset_max_event_on FROM operational"
     )
     horizon = f"INTERVAL '{horizon_days} days'"
@@ -490,7 +506,7 @@ def get_cycles(
     with connect() as conn:
         client_map, place_map = _build_text_maps(conn)
         sql = (
-            _chain_sql(client_map, place_map, single_item=item_id is not None)
+            _chain_sql(client_map, place_map, single_item=item_id is not None, as_of=as_of)
             + f"""
 , dataset_boundary AS ({boundary}),
 
@@ -627,17 +643,19 @@ WINDOW previous_cycles AS (
 ORDER BY c.item_identifier_clean, c.installation_sequence
 """
         )
-        params: tuple = ()
-        if item_id is not None:
-            params = (_normalize(item_id), pd.Timestamp(dataset_max_event_on).to_pydatetime())
+        params = _chain_params(item_id, dataset_max_event_on)
+        if as_of:
+            params = params + (pd.Timestamp(dataset_max_event_on).to_pydatetime(),)
         return _query(conn, sql, params)
 
 
-def get_failure_episodes(item_id: str | None = None) -> pd.DataFrame:
+def get_failure_episodes(
+    item_id: str | None = None, as_of: pd.Timestamp | None = None
+) -> pd.DataFrame:
     with connect() as conn:
         client_map, place_map = _build_text_maps(conn)
         sql = (
-            _chain_sql(client_map, place_map, single_item=item_id is not None)
+            _chain_sql(client_map, place_map, single_item=item_id is not None, as_of=as_of is not None)
             + f"""
 , {_inventory_lookup_cte()}
 
@@ -659,8 +677,7 @@ LEFT JOIN inventory_lookup hl
 ORDER BY f.item_identifier_clean, f.failure_onset_on, f.journey_id
 """
         )
-        params = () if item_id is None else (_normalize(item_id),)
-        return _query(conn, sql, params)
+        return _query(conn, sql, _chain_params(item_id, as_of))
 
 
 def _normalize(item_id: str) -> str:

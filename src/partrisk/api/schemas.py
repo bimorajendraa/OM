@@ -35,6 +35,12 @@ class InspectionRequest(BaseModel):
     host_serial_code: str = Field(
         description="Label fisik PART (format MODEL-PAIRINGCODE-REPAIRSEQ)."
     )
+    external_event_id: str | None = Field(
+        default=None,
+        description=(
+            "ID unik dari aplikasi pemanggil (opsional) - kalau dikirim ulang request dianggap sama dan tidak membuat inspection baru."
+        ),
+    )
 
 
 class InspectionResult(BaseModel):
@@ -45,6 +51,7 @@ class InspectionResult(BaseModel):
     cycle_id: str
     inspection_seq: int
     alert_id: int | None
+    external_event_id: str | None
     performed_at: str
     created_at: str
 

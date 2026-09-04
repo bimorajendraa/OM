@@ -64,6 +64,23 @@ _PREDICTION_COLUMNS = (
 )
 
 
+_PREDICTION_PROBABILITY_COLUMNS = (
+    "failure_probability_30d", "failure_probability_60d",
+    "failure_probability_90d", "failure_probability_120d",
+)
+
+
+def _check_scores_before_persist(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        raise RuntimeError("Batch scoring kosong - tidak ada baris untuk disimpan.")
+    if frame["item_id"].duplicated().any():
+        duplicates = frame.loc[frame["item_id"].duplicated(), "item_id"].unique().tolist()
+        raise RuntimeError(f"item_id duplikat dalam satu batch: {duplicates}")
+    for column in _PREDICTION_PROBABILITY_COLUMNS:
+        if frame[column].isna().any():
+            raise RuntimeError(f"Kolom {column} mengandung NaN - batal disimpan.")
+
+
 def record_predictions(
     run_id: int,
     frame: pd.DataFrame,
@@ -72,6 +89,7 @@ def record_predictions(
     feature_version: str | None = None,
 ) -> int:
     """Tulis satu baris `item_prediction` per PART di `frame`. APPEND-ONLY."""
+    _check_scores_before_persist(frame)
     rows = [
         (
             run_id,
@@ -91,8 +109,6 @@ def record_predictions(
         )
         for _, row in frame.iterrows()
     ]
-    if not rows:
-        return 0
 
     with db.connect() as conn:
         with conn.cursor() as cur:
@@ -128,26 +144,27 @@ def run_and_persist() -> dict:
 
     model_version = None
     run_id = None
+    opened_alert_ids: list[int] = []
     try:
         scores = serving_batch.score_active_parts(force_refresh=True)
         model_version = scores.model_version["failure"]
         run_id = start_run(model_version)
         scored_at = pd.Timestamp.now(tz="UTC")
         row_count = record_predictions(run_id, scores.frame, model_version, scored_at)
+
+        prediction_ids = prediction_ids_for_run(run_id)
+        scores.frame["prediction_id"] = scores.frame["item_id"].map(prediction_ids)
+        opened_alert_ids = alert_engine.evaluate_and_open(scores.frame, scored_at)
+
         complete_run(run_id, row_count)
         logger.info("model_run %s selesai: %d baris disimpan", run_id, row_count)
+        if opened_alert_ids:
+            logger.info("run_id %s membuka %d alert baru: %s", run_id, len(opened_alert_ids), opened_alert_ids)
     except Exception as error:  # noqa: BLE001
         logger.exception("model_run gagal")
         if run_id is not None:
             fail_run(run_id, str(error))
         raise
-
-    prediction_ids = prediction_ids_for_run(run_id)
-    scores.frame["prediction_id"] = scores.frame["item_id"].map(prediction_ids)
-
-    opened_alert_ids = alert_engine.evaluate_and_open(scores.frame, scored_at)
-    if opened_alert_ids:
-        logger.info("run_id %s membuka %d alert baru: %s", run_id, len(opened_alert_ids), opened_alert_ids)
 
     return {
         "run_id": run_id,

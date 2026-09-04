@@ -152,14 +152,25 @@ def _emergency_override(current_score: float, previous_score: float | None) -> b
     return False
 
 
-def resolve_by_item(item_id: str, performed_at: pd.Timestamp) -> dict:
-    """Jalur MANUAL diidentifikasi lewat item (bukan alert_id)."""
+def resolve_by_item(
+    item_id: str, performed_at: pd.Timestamp, external_event_id: str | None = None
+) -> dict:
+    """Jalur MANUAL diidentifikasi lewat item (bukan alert_id).
+    `external_event_id` opsional - retry idempotent, lihat docs/CODE_NOTES.md."""
+    if external_event_id is not None:
+        existing = inspections.find_by_external_event_id(external_event_id)
+        if existing is not None:
+            alert = get_alert(existing["alert_id"]) if existing["alert_id"] is not None else None
+            return {"inspection": existing, "alert": alert}
+
     alert = open_alerts_by_item([item_id]).get(item_id)
     if alert is not None:
-        result = resolve_with_inspection(alert["alert_id"], performed_at)
+        result = resolve_with_inspection(alert["alert_id"], performed_at, external_event_id)
         return {"inspection": result["inspection"], "alert": result["alert"]}
 
-    inspection_row = inspections.record_inspection(item_id, performed_at)
+    inspection_row = inspections.record_inspection(
+        item_id, performed_at, external_event_id=external_event_id
+    )
     return {"inspection": inspection_row, "alert": None}
 
 
@@ -234,7 +245,9 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
     return opened_ids
 
 
-def resolve_with_inspection(alert_id: int, performed_at: pd.Timestamp) -> dict:
+def resolve_with_inspection(
+    alert_id: int, performed_at: pd.Timestamp, external_event_id: str | None = None
+) -> dict:
     """Jalur MANUAL untuk mematikan alert."""
     alert = get_alert(alert_id)
     if alert is None:
@@ -276,11 +289,14 @@ def resolve_with_inspection(alert_id: int, performed_at: pd.Timestamp) -> dict:
             cur.execute(
                 f"""
                 INSERT INTO predictive.inspection
-                    (item_id, cycle_id, inspection_seq, alert_id, performed_at)
-                VALUES (%s, %s, %s, %s, %s)
+                    (item_id, cycle_id, inspection_seq, alert_id, external_event_id, performed_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING {inspections._SELECT_COLUMNS}
                 """,
-                (alert["item_id"], alert["cycle_id"], next_seq, alert_id, performed_at_value),
+                (
+                    alert["item_id"], alert["cycle_id"], next_seq, alert_id,
+                    external_event_id, performed_at_value,
+                ),
             )
             inspection_row = inspections._row_to_dict(cur.fetchone())
 

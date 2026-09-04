@@ -107,13 +107,15 @@ def cached_scores() -> BatchScores | None:
     return _CACHE
 
 
-def _fetch_batch_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-
+def _fetch_batch_inputs(
+    data_end: pd.Timestamp,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Empat pembacaan konkuren, dibatasi `data_end` yang sama (as_of)."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        cycles_future = executor.submit(data_reader.get_cycles)
-        events_future = executor.submit(data_reader.get_events)
-        episodes_future = executor.submit(data_reader.get_failure_episodes)
-        terminal_future = executor.submit(data_reader.get_terminal_context)
+        cycles_future = executor.submit(data_reader.get_cycles, None, data_end)
+        events_future = executor.submit(data_reader.get_events, None, data_end)
+        episodes_future = executor.submit(data_reader.get_failure_episodes, None, data_end)
+        terminal_future = executor.submit(data_reader.get_terminal_context, None, data_end)
         return (
             cycles_future.result(), events_future.result(),
             episodes_future.result(), terminal_future.result(),
@@ -121,15 +123,13 @@ def _fetch_batch_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.
 
 
 def _compute(generation_value: int) -> BatchScores:
-    current_data_end()
+    data_end = current_data_end()
     try:
-        cycles, events, episodes, terminal_raw = _fetch_batch_inputs()
+        cycles, events, episodes, terminal_raw = _fetch_batch_inputs(data_end)
     except psycopg.Error as error:
         raise serving.DataSourceUnavailable(
             f"Database tidak bisa dibaca ({type(error).__name__})."
         ) from error
-
-    data_end = pd.Timestamp(cycles["dataset_max_event_on"].max())
 
     failure, snapshot = _score_failure(cycles, events, episodes, data_end)
 
