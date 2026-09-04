@@ -182,7 +182,6 @@ def corrective_degradation_trend(landmarks: pd.DataFrame, events: pd.DataFrame) 
     out = pd.DataFrame(index=landmarks.index)
     out["has_failure_interval_trend"] = has_trend
     out["log_failure_interval_mean_days"] = np.log1p(np.clip(mean_gap, 0, None))
-    out["log_failure_interval_last_days"] = np.log1p(np.clip(last_gap, 0, None))
     out["failure_interval_trend_ratio"] = np.where(valid_mean, np.clip(trend_ratio, 0, 10), 1.0)
     return out
 

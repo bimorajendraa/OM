@@ -6,30 +6,6 @@ catboost_info
 .env
 .pytest_cache
 *.md
-
-# Eksperimen survival - artifact-nya bisa berukuran GB (RandomSurvivalForest
-# menyimpan kurva per leaf node) dan reports/eksperimen tidak dibutuhkan
-# runtime. Tanpa baris ini, `COPY . .` di Dockerfile menyeret ~5,8 GB
-# artifact eksperimen ke setiap image production (lihat reports/gate_decision.md
-# fase restrukturisasi survival - Fase 0.1).
-#
-# KECUALI 3 file compact di bawah - predict/survival.py (field advisory
-# median_days_to_failure/survival_curve, mode aditif) MEMBACA-nya di
-# runtime dari survival_model/event_based/artifacts/. Tanpa pengecualian
-# ini field advisory diam-diam selalu None di production (FileNotFoundError
-# tertangkap dan disembunyikan sengaja - lihat serving/predictor.py
-# _survival_advisory_fields) walau seluruh test lokal lulus, karena test
-# jalan di luar container tanpa .dockerignore. y_train.joblib dan
-# _experiment_cache/ TIDAK disertakan - keduanya cuma dipakai training/
-# evaluasi, bukan predict_survival.load_model().
-survival_model/*
-!survival_model/event_based
-survival_model/event_based/*
-!survival_model/event_based/artifacts
-survival_model/event_based/artifacts/*
-!survival_model/event_based/artifacts/models.joblib
-!survival_model/event_based/artifacts/encoder.joblib
-!survival_model/event_based/artifacts/metadata.json
 reports/
 tests/
 .cache/

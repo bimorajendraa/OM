@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import concurrent.futures
-import functools
 import logging
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -19,66 +17,6 @@ from partrisk.engines import predict as failure_model
 from partrisk.serving import single as serving
 
 logger = logging.getLogger(__name__)
-
-
-_CACHEABLE = (
-    "get_dataset_max_event_on", "get_events", "get_cycles",
-    "get_failure_episodes", "get_terminal_context",
-)
-
-_local = threading.local()
-_installed = False
-
-
-def _scope() -> dict | None:
-    return getattr(_local, "scope", None)
-
-
-def _wrap(name: str, original):
-    @functools.wraps(original)
-    def reader(*args, **kwargs):
-        scope = _scope()
-        if scope is None:
-            return original(*args, **kwargs)
-
-        key = (name, args, tuple(sorted(kwargs.items())))
-        if key not in scope:
-            scope[key] = original(*args, **kwargs)
-        return scope[key]
-
-    reader.__wrapped_by_query_cache__ = True
-    return reader
-
-
-def install() -> None:
-    global _installed
-    if _installed:
-        return
-    for name in _CACHEABLE:
-        original = getattr(data_reader, name)
-        if getattr(original, "__wrapped_by_query_cache__", False):
-            continue
-        setattr(data_reader, name, _wrap(name, original))
-    _installed = True
-
-
-@contextmanager
-def request_scope():
-    install()
-    if _scope() is not None:
-        yield
-        return
-
-    _local.scope = {}
-    try:
-        yield
-    finally:
-        _local.scope = None
-
-
-def reads_in_scope() -> int:
-    scope = _scope()
-    return 0 if scope is None else len(scope)
 
 
 _DATA_STATE_LOCK = threading.RLock()
@@ -114,15 +52,6 @@ def current_data_end(force_refresh: bool = False) -> pd.Timestamp:
 def generation() -> int:
     with _DATA_STATE_LOCK:
         return _generation
-
-
-def reset() -> None:
-    global _data_end, _checked_at, _generation
-    with _DATA_STATE_LOCK:
-        _data_end = None
-        _checked_at = 0.0
-        _generation = 0
-        failure_model.clear_fleet_cache()
 
 
 _HORIZONS = config.PREDICTION_HORIZON_DAYS

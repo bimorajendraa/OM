@@ -1818,3 +1818,100 @@ dikembalikan kosong, sesuai kebiasaan sepanjang sesi ini). `pytest -q`
 penuh tetap lolos.
 
 ---
+
+## 36 · Pembersihan kode mati + dokumentasi basi peninggalan refactor dashboard/survival/scrap
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user: "hapus segala
+code yang tidak dipakai dan tidak berhubungan lagi termasuk cli yang
+sudah tidak dipakai lagi", lalu "buang docs yang sudah tidak ada
+hubungannya semuanya. dan update readme yang sesuai dengan sekarang".
+
+**Kode dibuang** (diverifikasi zero-caller lewat grep di `src/`+`tests/`
+sebelum dihapus, `pytest -q` penuh lolos sesudahnya):
+- `predictive/inspections.py::list_for_cycle()` - tidak pernah dipanggil.
+- `core/data_reader.py::normalize` (alias publik `_normalize`) - seluruh
+  pemanggil internal sudah pakai `_normalize()` langsung.
+- `serving/batch.py`: seluruh subsistem query-cache request-scoped
+  (`_CACHEABLE`, `_local`, `_installed`, `_scope()`, `_wrap()`, `install()`,
+  `request_scope()`, `reads_in_scope()`) dan `reset()` - satu-satunya
+  pemakainya adalah fungsi single-item GET serving lama yang sudah dibuang
+  §29 (`serving/single.py::predict_failure`/`get_part_assessment`/dst).
+- `api/schemas.py::ErrorResponse` - tidak pernah dipakai sebagai
+  `response_model` atau diinstansiasi; exception handler `app.py` membangun
+  dict error secara manual.
+- `core/features.py::corrective_degradation_trend()` - kolom
+  `log_failure_interval_last_days` dihitung tapi tidak pernah dibaca (tidak
+  di `config.DEGRADATION_FEATURES`/`FEATURE_COLUMNS` maupun tempat lain).
+
+**Dependensi tersembunyi yang ketahuan saat regenerasi `requirements.lock.txt`**
+(lihat di bawah): `psutil` (dipakai `cli.py::_rss_mb()` untuk
+`baseline-performance`) dan `pyarrow` (dipakai `cli.py::generate()`/
+`golden-batch` untuk parquet) TIDAK PERNAH terdaftar di
+`requirements.txt`/`requirements-serving.txt` - keduanya cuma kebetulan
+terpasang di `.venv` dev (pyarrow ikut terbawa sebagai dependensi
+Streamlit yang sekarang sudah dihapus). Ditambahkan eksplisit ke
+`requirements.txt` supaya environment baru/CI tidak diam-diam gagal impor.
+Ketahuan lewat cara yang benar: install `requirements-serving.txt` FRESH
+ke venv kosong lalu jalankan `pytest -q` penuh (bukan `pip freeze` dari
+`.venv` dev yang sudah lama terpasang macam-macam) - dua bug nyata baru
+ketahuan setelah gap ini ditutup satu-satu (`ModuleNotFoundError: psutil`,
+lalu `ImportError: pyarrow`).
+
+**`requirements.lock.txt` diregenerasi dari nol** (venv kosong -> install
+`requirements-serving.txt` -> `pytest -q` penuh lolos -> `pip freeze`) -
+snapshot lama masih membawa `streamlit==1.61.1` dan belasan dependensi
+khusus dashboard (`altair`, `pydeck`, `watchdog`, dst) yang tidak pernah
+dibersihkan sejak dashboard dihapus §29. `matplotlib`/`plotly`/`graphviz`
+(dan turunannya `contourpy`/`cycler`/`fonttools`/`kiwisolver`/`pillow`/
+`narwhals`) TETAP ADA di snapshot baru - ini BUKAN sisa Streamlit,
+melainkan dependensi asli CatBoost sendiri (`pip show catboost` ->
+`Requires: graphviz, matplotlib, numpy, pandas, plotly, scipy, six`),
+diverifikasi sebelum diputuskan bukan kandidat buang.
+
+**Dokumentasi dibuang** (`docs/CODE_NOTES.md`, `docs/METHODOLOGY.md`):
+seluruh entri untuk file yang sudah dihapus TOTAL dari repo - `dashboard/`
+(§29), `serving/alerts.py` lama (§26), `api/services.py` (geocoding +
+monitoring GET), `core/features_survival.py`, `engines/survival/*.py`,
+`engines/scrap/*.py`, `engines/failure/train_mtbf_candidate.py`,
+`tests/test_serving.py`/`test_freshness.py`/`test_map_markers.py`.
+`docs/CODE_NOTES.md` sebelumnya eksplisit menyatakan entri dashboard
+"dipertahankan sebagai arsip historis" (keputusan sengaja sebelumnya,
+lihat §29) - user mengonfirmasi eksplisit keputusan itu DIBALIK sekarang,
+dibuang bukan diarsipkan lagi, karena `docs/DECISIONS.md`/`docs/EXPERIMENTS.md`
+sendiri sudah cukup sebagai log historis permanen. Beberapa paragraf yang
+SEBAGIAN basi (bukan seluruh section mati) diperbaiki di tempat, bukan
+dihapus - mis. `METHODOLOGY.md::config` yang menyebut struktur
+`src/partrisk/config/` (package lama, sudah dikonsolidasi ke satu file
+`core/config.py`) dan `cli::bootstrap-ci` yang masih menjelaskan
+resample untuk model scrap/survival yang sudah tidak ada di
+`cli.py::_bootstrap_ci_main()` sekarang (cuma model kerusakan).
+
+`docs/DECISIONS.md` dan `docs/EXPERIMENTS.md` SENGAJA TIDAK disentuh -
+keduanya log kronologis permanen by design (§ masing-masing dokumen),
+menyebut hal yang sudah dihapus/berubah adalah ekspektasi normal, bukan
+tanda basi.
+
+**Diketahui BELUM dikerjakan** (di luar scope pass ini, dilaporkan ke
+user sebagai temuan): `docs/METHODOLOGY.md` masih punya beberapa paragraf
+di dalam section yang TETAP relevan (header cocok modul yang masih hidup)
+tapi sebagian isinya menyebut modul/file yang sudah dihapus (mis.
+`## \`serving_batch\`` masih menyebut `predict_scrap.py`/
+`scrap_features.py`/`tests/test_parity.py` peninggalan model scrap) -
+audit akurasi baris-demi-baris penuh terhadap ~700 baris sisa file ini
+belum dikerjakan, di luar scope "buang section yang sudah tidak
+berhubungan".
+
+**README.md diperbarui**: endpoint table dipangkas jadi `/health` +
+`POST /api/v1/inspections` saja (sebelumnya masih mendaftar endpoint GET
+yang sudah dihapus §29 dan path `POST /api/v1/interventions` pra-rename
+§31), section Struktur diperbaiki (`interventions.py` -> `inspections.py`,
+deskripsi `cycles.py` yang masih bilang "sinkron item_cycle" padahal
+tabel itu sudah dihapus §30), contoh command test yang merujuk
+`tests/test_serving.py` (sudah dihapus §29) diganti `tests/test_batch.py`.
+
+**Verifikasi**: `pytest -q` penuh dijalankan DUA KALI - sekali di `.venv`
+dev sesudah penghapusan kode mati, sekali lagi di venv kosong baru
+(setelah `requirements.txt` diperbaiki) sebagai bagian regenerasi lock
+file - keduanya lolos penuh.
+
+---

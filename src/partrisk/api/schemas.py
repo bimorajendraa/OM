@@ -74,11 +74,3 @@ class InspectionResponse(BaseModel):
     alert: AlertResult | None = Field(
         description="Alert yang ikut di-RESOLVE, kalau item ini sedang punya alert OPEN. null kalau tidak ada."
     )
-
-
-class ErrorResponse(BaseModel):
-    model_config = _CONFIG
-
-    status: str
-    message: str
-    item_id: str | None = None

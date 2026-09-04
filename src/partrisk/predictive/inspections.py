@@ -19,20 +19,6 @@ def _row_to_dict(row) -> dict:
     return dict(zip(_COLUMNS, row))
 
 
-def list_for_cycle(cycle_id: str) -> list[dict]:
-    with db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT {_SELECT_COLUMNS} FROM predictive.inspection
-                WHERE cycle_id = %s ORDER BY inspection_seq
-                """,
-                (cycle_id,),
-            )
-            rows = cur.fetchall()
-    return [_row_to_dict(row) for row in rows]
-
-
 def record_inspection(
     item_id: str,
     performed_at: pd.Timestamp,

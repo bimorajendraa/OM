@@ -667,9 +667,6 @@ def _normalize(item_id: str) -> str:
     return " ".join(str(item_id).strip().upper().split())
 
 
-normalize = _normalize
-
-
 def resolve_item_by_host_serial_code(host_serial_code: str) -> str | None:
     """Cari item_id internal (item_identifier_clean, dipakai seluruh schema
     predictive - cycle/inspection/alert) dari host_serial_code: label fisik

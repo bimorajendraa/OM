@@ -61,9 +61,11 @@ uvicorn partrisk.api.app:app --reload
 Dokumentasi interaktif: <http://127.0.0.1:8000/docs>
 
 Tidak ada endpoint GET untuk data prediksi/rekomendasi - satu-satunya
-endpoint publik adalah `POST /api/v1/interventions` (docs/DECISIONS.md
-§28/§29). Aplikasi eksternal yang butuh baca prediksi/alert langsung baca
-schema `predictive` dari database.
+endpoint publik adalah `POST /api/v1/inspections` (docs/DECISIONS.md
+§28/§29/§31). Aplikasi eksternal yang butuh baca prediksi/alert langsung
+baca schema `predictive` dari database - `item_prediction`/`alert` punya
+kolom `host_serial_code`/`terminal_serial_code` untuk join lintas schema
+(docs/DECISIONS.md §35).
 
 ### 4. Docker
 
@@ -100,20 +102,11 @@ dijalankan rutin.
 | Endpoint | Kegunaan |
 |---|---|
 | `GET /health` | status aplikasi, versi model, kesegaran cache batch (`?check_database=true` untuk ikut menguji koneksi DB) |
-| `GET /api/v1/model` | versi, fitur, ambang risiko, metrik uji model |
-| `GET /api/v1/parts/{item_id}/failure` | peluang rusak 30/60/90/120 hari |
-| `GET /api/v1/parts/{item_id}/assessment` | peluang rusak + rekomendasi + faktor risiko |
-| `GET /api/v1/parts/{item_id}/history` | tanggal kerusakan dan lokasi yang pernah tercatat |
-| `GET /api/v1/recommendations` | antrian RESMI: hanya PART yang lolos gerbang presisi (`official_queue_only=true`, default) - ukuran dinamis, boleh kosong. `official_queue_only=false` = mode eksplorasi (seluruh armada, terurut `tier_score`, tidak disaring `risk_level`) |
-| `GET /api/v1/overview` | angka ringkas armada + daftar teratas |
-| `GET /api/v1/filters` | nilai filter yang benar-benar ada di data |
-| `GET /api/v1/terminals` | ringkasan per Terminal fisik (jumlah PART, sebaran risiko, PART paling berisiko) |
-| `GET /api/v1/terminals/{terminal_id}/parts` | level 2 hierarki: ringkasan per Part Type (`item_model_code`) dalam satu Terminal |
-| `GET /api/v1/terminals/{terminal_id}/parts/{part_type}` | level 3 hierarki: daftar Item untuk satu Part Type dalam satu Terminal |
-| `POST /api/v1/alerts/{alert_id}/interventions` | catat satu perbaikan untuk satu alert - resolve alert lewat intervention tercatat, transaksional + idempotent (`predictive/alerts.py`, lihat docs/DATABASE.md) |
+| `POST /api/v1/inspections` | catat satu perbaikan untuk satu PART, diidentifikasi lewat `host_serial_code` (body) - resolve alert OPEN kalau ada, transaksional (`predictive/alerts.py`, lihat docs/DATABASE.md) |
 
-Filter `/api/v1/recommendations`: `search`, `risk`, `priority`, `item_type`,
-`client`, `location`, `terminal_id`, `limit`, `offset`.
+Tidak ada endpoint GET lain - aplikasi eksternal yang butuh baca
+prediksi/alert langsung baca schema `predictive` dari database
+(docs/DECISIONS.md §29).
 
 ## Angka performa - dan artinya
 
@@ -169,13 +162,13 @@ src/partrisk/
 ├── predictive/
 │   ├── db.py                   koneksi tulis schema `predictive` + migration runner
 │   ├── scoring.py               model_run + item_prediction (append-only) - `score-and-persist`
-│   ├── cycles.py                 sinkron item_cycle dari data operasional (on-demand per item)
-│   ├── interventions.py          catat tindakan teknisi - intervention_seq DALAM cycle aktif
-│   └── alerts.py                 alert persisten: buka (scheduled scoring), baca (live), resolve (intervention)
+│   ├── cycles.py                 baca cycle LANGSUNG dari data operasional (tanpa tabel mirror) + advisory lock per item_id
+│   ├── inspections.py            catat tindakan teknisi - inspection_seq DALAM cycle aktif
+│   └── alerts.py                 alert persisten: buka (scheduled scoring), baca (live), resolve (inspection manual atau auto lewat cycle tertutup)
 ├── api/
-│   ├── app.py                  FastAPI: /health + POST /api/v1/interventions saja (docs/DECISIONS.md §29)
+│   ├── app.py                  FastAPI: /health + POST /api/v1/inspections saja (docs/DECISIONS.md §29)
 │   └── schemas.py               bentuk request/response API
-└── cli.py                      pipeline/predict/golden-batch/baseline/backtest/dst - lihat `python -m partrisk.cli -h`
+└── cli.py                      pipeline/predict/score-and-persist/resolve-closed-alerts/golden-batch/baseline/backtest/dst - lihat `python -m partrisk.cli -h`
 
 migrations/predictive/   SQL migrasi schema predictive, terurut nomor - lihat docs/DATABASE.md
 tests/           conftest.py + test_pipeline.py + test_lifecycle.py + test_gate.py +
@@ -219,7 +212,7 @@ production.
 
 ```bash
 pytest                                # seluruhnya
-pytest tests/test_serving.py -k recommend   # subset logic murni, tanpa DB
+pytest tests/test_batch.py            # subset - batch scoring & context attach
 ```
 
 Test yang butuh database/model/internet di-skip (bukan gagal) kalau tidak
