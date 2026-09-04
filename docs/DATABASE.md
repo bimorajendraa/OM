@@ -146,7 +146,11 @@ tidak bisa saling tabrak nomor urut.
   operasional (`cycles.py::cycle_status()`, §30); kalau cycle sudah
   tertutup, UPDATE langsung ke RESOLVED dengan `resolution_reason=f"
   OPERATIONAL_CYCLE_CLOSED:{end_reason}"` - TANPA inspection row, TANPA
-  panggilan API. Tidak menyentuh alert yang cycle-nya masih aktif.
+  panggilan API. Tidak menyentuh alert yang cycle-nya masih aktif. Dipanggil
+  dari DUA jalur (§34): `evaluate_and_open()` (nebeng siklus scoring
+  bulanan) DAN `python -m partrisk.cli resolve-closed-alerts` (murah,
+  boleh dijadwalkan lebih sering - mis. harian - karena tidak perlu skor
+  ulang armada).
 - `resolve_by_item(item_id, performed_at)` (docs §28) - **titik masuk**
   endpoint `POST /api/v1/inspections` (body cuma `host_serial_code`,
   diresolve ke `item_id` lewat `core.data_reader.

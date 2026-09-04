@@ -79,7 +79,8 @@ dipakai adalah PostgreSQL yang sudah ada, kredensial dari `.env` di host.
 ```bash
 python -m partrisk.cli pipeline               # uji jalur database -> fitur, tanpa model
 python -m partrisk.cli predict --top 20        # batch prediction manual ke terminal/CSV
-python -m partrisk.cli score-and-persist       # skor + simpan ke predictive DB (dipanggil scheduler)
+python -m partrisk.cli score-and-persist       # skor + simpan ke predictive DB (dipanggil scheduler bulanan)
+python -m partrisk.cli resolve-closed-alerts   # tutup alert yang cycle-nya sudah tertutup, tanpa skor ulang (dipanggil scheduler harian)
 python -m partrisk.cli golden-batch generate --out FILE   # oracle regresi (lihat docs/DECISIONS.md)
 python -m partrisk.cli golden-batch compare A B
 python -m partrisk.cli baseline-performance    # RSS/latency model kerusakan

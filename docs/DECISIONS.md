@@ -1712,3 +1712,54 @@ menghapus). Skema live diverifikasi cocok persis dengan migration file
 lewat `information_schema.columns`/`pg_get_constraintdef()`.
 
 ---
+
+## 34 · `resolve-closed-alerts` - auto-resolve dipisah dari scoring bulanan, boleh dijadwalkan lebih sering
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user.
+
+**Masalah**: `auto_resolve_closed_cycles()` (jalur OTOMATIS mematikan
+alert, §27) HANYA dipanggil dari `evaluate_and_open()`, yang HANYA
+dipanggil dari `run_and_persist()` (`score-and-persist`, siklus scoring
+BULANAN - skor ulang SELURUH armada part aktif, berat). Konsekuensinya:
+kalau part diperbaiki (dismantle/failure/return tercatat di data
+operasional) tanggal 3, alert-nya baru benar-benar ditutup DI SISTEM KITA
+tanggal scoring berikutnya jalan (bisa sampai ~30 hari kemudian) - padahal
+faktanya part itu sudah lama beres, cuma belum sempat dicek ulang.
+
+**Kenapa baru sekarang diperbaiki**: alasan asal kenapa auto-resolve
+nebeng di siklus bulanan adalah waktu itu direncanakan predictive DB
+TERPISAH dari operasional (butuh proses pull/sync mahal antar-server) -
+lihat riwayat §22. Sejak diputuskan SATU database yang sama (§22, final),
+alasan itu sudah tidak berlaku - `auto_resolve_closed_cycles()` sendiri
+MURAH (baca data operasional cuma untuk alert yang sedang OPEN, tidak
+perlu load model/skor ulang armada) sehingga aman dipanggil jauh lebih
+sering tanpa beban berarti.
+
+**Implementasi** (`src/partrisk/cli.py`): command baru
+`resolve-closed-alerts` - murni memanggil
+`alert_engine.auto_resolve_closed_cycles()` (tanpa argumen, seluruh alert
+OPEN disapu), dicatat lewat logger sama seperti `score-and-persist`.
+Dimaksudkan dijadwalkan scheduler eksternal LEBIH SERING (mis. harian)
+daripada `score-and-persist` (bulanan) - dua jadwal terpisah, bukan
+menggantikan yang bulanan.
+
+**Yang TIDAK berubah**: `evaluate_and_open()` (dipanggil dari
+`score-and-persist` bulanan) TETAP memanggil `auto_resolve_closed_cycles()`
+di awal juga - bukan dihapus, supaya kalaupun jadwal harian belum/lupa
+dipasang scheduler eksternal, siklus bulanan tetap jadi jaring pengaman
+yang menutup alert basi cepat atau lambat. Skor probabilitas part TETAP
+cuma diperbarui bulanan (docs §11, ambang gerbang presisi divalidasi di
+siklus itu) - command baru ini SAMA SEKALI tidak menyentuh scoring/model.
+
+**Belum dikerjakan** (di luar scope pass ini): konfigurasi scheduler
+eksternal sesungguhnya (cron/Task Scheduler) untuk menjalankan
+`resolve-closed-alerts` harian - itu infrastruktur di luar repo ini,
+sama seperti `score-and-persist` sekarang.
+
+**Verifikasi**: smoke test manual `python -m partrisk.cli
+resolve-closed-alerts` terhadap database nyata - selesai 0.1 detik
+(tidak ada alert OPEN saat itu, `alert_resolved=0`), membuktikan
+perintah ini jauh lebih ringan dibanding `score-and-persist` yang
+butuh puluhan detik untuk skor ulang seluruh armada.
+
+---

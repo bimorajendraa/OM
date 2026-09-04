@@ -76,6 +76,25 @@ def _score_and_persist_main() -> int:
     return 0
 
 
+_resolve_closed_alerts_logger = logging.getLogger("resolve_closed_alerts")
+
+
+def _resolve_closed_alerts_main() -> int:
+    from partrisk.predictive import alerts as alert_engine
+
+    started = time.time()
+    try:
+        resolved_ids = alert_engine.auto_resolve_closed_cycles()
+    except Exception:
+        _resolve_closed_alerts_logger.exception("resolve-closed-alerts gagal")
+        return 1
+    _resolve_closed_alerts_logger.info(
+        "alert_resolved=%d selesai dalam %.1f detik: %s",
+        len(resolved_ids), time.time() - started, resolved_ids,
+    )
+    return 0
+
+
 _predict_logger = logging.getLogger("prediction")
 
 
@@ -902,7 +921,7 @@ def main() -> int:
     p_predict = sub.add_parser(
         "predict",
         help="Batch prediction untuk seluruh PART aktif.",
-        description="Batch prediction untuk seluruh PART aktif (CLI, sama dengan GET /api/v1/recommendations).",
+        description="Batch prediction untuk seluruh PART aktif (cetak ke terminal, opsional simpan CSV).",
     )
     p_predict.add_argument("--output", help="Simpan seluruh hasil ke file CSV (opsional).")
     p_predict.add_argument("--top", type=int, default=10, help="Berapa baris teratas dicetak.")
@@ -911,6 +930,13 @@ def main() -> int:
         "score-and-persist",
         help="Milestone 2: skor seluruh PART aktif dan simpan sebagai model_run + "
         "item_prediction baru di schema predictive. Dipanggil scheduler eksternal berkala.",
+    )
+
+    sub.add_parser(
+        "resolve-closed-alerts",
+        help="Tutup alert OPEN yang cycle-nya sudah tertutup di data operasional, "
+        "tanpa skor ulang seluruh armada. Ringan - bisa dijadwalkan lebih sering "
+        "(mis. harian) daripada score-and-persist (docs/DECISIONS.md §34).",
     )
 
     p_golden = sub.add_parser(
@@ -964,6 +990,8 @@ def main() -> int:
         return _predict_main(args)
     if args.command == "score-and-persist":
         return _score_and_persist_main()
+    if args.command == "resolve-closed-alerts":
+        return _resolve_closed_alerts_main()
     if args.command == "golden-batch":
         return _golden_batch_main(args)
     if args.command == "baseline-performance":
