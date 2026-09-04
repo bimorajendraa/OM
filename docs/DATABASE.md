@@ -53,6 +53,8 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
                          -- BUKAN ID internal terminal_inventory_item_id yang
                          -- dipakai live/filtering di serving/batch.py (§30)
   part_type, item_id,
+  host_serial_code       -- serial code FISIK part (§35), kolom JOIN untuk
+                          -- tim eksternal - BUKAN pengganti item_id/cycle_id
   p30, p60, p90, p120, risk_level, gate_flagged,
   scored_at, model_version, feature_version
 
@@ -68,7 +70,9 @@ predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, R
 
 predictive.alert                                                  -- Milestone 5
   alert_id, terminal_serial_code (serial code fisik terminal, sama seperti
-  item_prediction, lihat §30), part_type, item_id, cycle_id,
+  item_prediction, lihat §30), part_type, item_id,
+  host_serial_code (serial code fisik part, sama seperti item_prediction - §35),
+  cycle_id,
   inspection_seq (seq yang AKAN dipakai inspection yang menyelesaikan alert ini),
   prediction_id -> item_prediction (nullable, UNIQUE - §32),
   opened_at, opened_score, status (OPEN/RESOLVED - §33),

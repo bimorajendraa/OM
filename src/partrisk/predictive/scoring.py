@@ -58,7 +58,7 @@ def fail_run(run_id: int, error_message: str) -> None:
 
 
 _PREDICTION_COLUMNS = (
-    "run_id", "terminal_serial_code", "part_type", "item_id",
+    "run_id", "terminal_serial_code", "part_type", "item_id", "host_serial_code",
     "p30", "p60", "p90", "p120", "risk_level", "gate_flagged",
     "scored_at", "model_version", "feature_version",
 )
@@ -78,6 +78,7 @@ def record_predictions(
             None if pd.isna(row.get("terminal_label")) else str(row["terminal_label"]),
             row.get("item_model_code"),
             row["item_id"],
+            None if pd.isna(row.get("host_serial_code")) else str(row["host_serial_code"]),
             float(row["failure_probability_30d"]),
             float(row["failure_probability_60d"]),
             float(row["failure_probability_90d"]),

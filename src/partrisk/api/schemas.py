@@ -56,9 +56,10 @@ class AlertResult(BaseModel):
     terminal_serial_code: str | None
     part_type: str | None
     item_id: str
+    host_serial_code: str | None
     cycle_id: str
     inspection_seq: int
-    status: Literal["OPEN", "ACKNOWLEDGED", "RESOLVED", "SUPPRESSED"]
+    status: Literal["OPEN", "RESOLVED"]
     opened_at: str
     opened_score: float
     resolved_at: str | None

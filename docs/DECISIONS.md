@@ -1763,3 +1763,58 @@ perintah ini jauh lebih ringan dibanding `score-and-persist` yang
 butuh puluhan detik untuk skor ulang seluruh armada.
 
 ---
+
+## 35 · `host_serial_code` sebagai kolom join eksternal di `item_prediction` dan `alert`
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit atasan user, diteruskan
+lewat user: "pengenalnya adalah host serial code untuk tiap codenya...
+termasuk juga terminal... karena agar mudah untuk join table dengan
+schema yang lainnya."
+
+**Masalah**: tim aplikasi eksternal lain butuh cara gampang men-JOIN
+`predictive.item_prediction`/`predictive.alert` ke skema lain (mis.
+`journal`, `inventory`) tanpa harus tahu `item_id` internal kita. Mereka
+kenal PART lewat `host_serial_code` (label fisik, format
+MODEL-PAIRINGCODE-REPAIRSEQ) - `terminal_serial_code` untuk TERMINAL
+sudah ada dari §28, tinggal `host_serial_code` untuk PART yang belum.
+
+**Sempat dipertimbangkan dan ditolak**: mengganti `cycle_id`/tracking
+cycle internal dengan angka urut di ekor `host_serial_code` (REPAIRSEQ),
+supaya tidak ada "dua pengenal siklus" yang kelihatan redundan. Divalidasi
+lewat data nyata (48 cycle nyata, 15 item multi-cycle): 12/48 (25%) cycle
+menunjukkan angka REPAIRSEQ BERUBAH tanpa ada event DISMANTLED/INSTALLED
+nyata di `journal.t_item_journey` - membuktikan REPAIRSEQ digerakkan
+proses lain (kemungkinan administratif gudang/perbaikan), bukan siklus
+pemasangan fisik sesungguhnya. Karena `cycle_id` dipakai untuk locking dan
+korelasi alert->cycle yang harus akurat, angka ini TIDAK bisa dipakai
+menggantikannya - lihat detail proses validasi ini kalau perlu diulang di
+`docs/CODE_NOTES.md` bagian `cycles.py`.
+
+**Implementasi**: `host_serial_code` ditambahkan sebagai kolom TEXT biasa
+(bukan pengganti apa pun) di `item_prediction` (`migrations/predictive/
+0001_init.sql`) dan `alert` (`migrations/predictive/0003_alerts.sql`),
+masing-masing dengan index biasa (bukan unique - satu host_serial_code
+bisa muncul di banyak baris riwayat prediksi/alert dari waktu ke waktu).
+Diisi di `serving/batch.py::_attach_context()` (ambil dari
+`data_reader.get_events()`, yang sudah menghitung
+`host_serial_code_clean` lewat CTE yang sama dipakai `get_cycles()`),
+lalu dibawa lewat `scoring.py::record_predictions()` dan
+`alerts.py::evaluate_and_open()` sampai ke baris `item_prediction`/
+`alert`.
+
+**Yang TIDAK berubah**: `item_id`/`cycle_id` TETAP satu-satunya pengenal
+yang dipakai untuk locking (`pg_advisory_xact_lock`, §30) dan pencocokan
+alert->cycle (`AlertCycleMismatch`, §27) - `host_serial_code` murni kolom
+tambahan untuk kebutuhan JOIN pihak luar, tidak disentuh logika internal
+sama sekali.
+
+**Verifikasi**: `score-and-persist` nyata dijalankan (run_id 137, 13.767
+baris `item_prediction`, 3 alert dibuka) - dicek langsung lewat SQL:
+`item_prediction` dengan `host_serial_code` NULL = 0 dari 13.767; 3 baris
+`alert` semuanya punya `host_serial_code`/`terminal_serial_code` yang
+cocok dengan baris `item_prediction` sumbernya lewat `prediction_id`.
+Data run ini dihapus lagi setelah verifikasi (tabel `predictive.*`
+dikembalikan kosong, sesuai kebiasaan sepanjang sesi ini). `pytest -q`
+penuh tetap lolos.
+
+---

@@ -415,7 +415,7 @@ def get_events(item_id: str | None = None) -> pd.DataFrame:
             _chain_sql(client_map, place_map, single_item=item_id is not None)
             + """
 SELECT journey_id, item_identifier_clean, created_on, wo_type_clean, status_clean,
-       item_type_clean, is_failure_onset, place_canonical_clean
+       item_type_clean, is_failure_onset, place_canonical_clean, host_serial_code_clean
 FROM operational
 WHERE item_identifier_clean IS NOT NULL
 ORDER BY item_identifier_clean, created_on, journey_id

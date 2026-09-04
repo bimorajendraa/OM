@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS predictive.item_prediction (
     terminal_serial_code TEXT,
     part_type TEXT,
     item_id TEXT NOT NULL,
+    host_serial_code TEXT,
 
     p30 DOUBLE PRECISION NOT NULL,
     p60 DOUBLE PRECISION NOT NULL,
@@ -41,3 +42,5 @@ CREATE INDEX IF NOT EXISTS ix_item_prediction_gate_flagged
     WHERE gate_flagged;
 CREATE INDEX IF NOT EXISTS ix_item_prediction_terminal
     ON predictive.item_prediction (terminal_serial_code);
+CREATE INDEX IF NOT EXISTS ix_item_prediction_host_serial_code
+    ON predictive.item_prediction (host_serial_code);

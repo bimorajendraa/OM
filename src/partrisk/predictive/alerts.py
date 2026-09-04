@@ -12,7 +12,8 @@ from partrisk.predictive import db
 from partrisk.predictive import inspections
 
 _ALERT_COLUMNS = (
-    "alert_id", "terminal_serial_code", "part_type", "item_id", "cycle_id", "inspection_seq",
+    "alert_id", "terminal_serial_code", "part_type", "item_id", "host_serial_code",
+    "cycle_id", "inspection_seq",
     "prediction_id", "opened_at", "opened_score", "status",
     "resolved_at", "resolution_reason", "suppression_until", "created_at", "updated_at",
 )
@@ -186,6 +187,8 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
         terminal_serial_code = None if pd.isna(terminal_serial_code) else str(terminal_serial_code)
         part_type = row.get("item_model_code")
         part_type = None if pd.isna(part_type) else str(part_type)
+        host_serial_code = row.get("host_serial_code")
+        host_serial_code = None if pd.isna(host_serial_code) else str(host_serial_code)
         prediction_id = row.get("prediction_id")
         prediction_id = None if pd.isna(prediction_id) else int(prediction_id)
 
@@ -213,14 +216,14 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
                 cur.execute(
                     """
                     INSERT INTO predictive.alert
-                        (terminal_serial_code, part_type, item_id, cycle_id, inspection_seq,
-                         prediction_id, opened_at, opened_score, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'OPEN')
+                        (terminal_serial_code, part_type, item_id, host_serial_code, cycle_id,
+                         inspection_seq, prediction_id, opened_at, opened_score, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN')
                     RETURNING alert_id
                     """,
                     (
-                        terminal_serial_code, part_type, item_id, cycle_id, next_seq,
-                        prediction_id, scored_at.to_pydatetime(), score,
+                        terminal_serial_code, part_type, item_id, host_serial_code, cycle_id,
+                        next_seq, prediction_id, scored_at.to_pydatetime(), score,
                     ),
                 )
                 alert_id = cur.fetchone()[0]

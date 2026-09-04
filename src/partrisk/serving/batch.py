@@ -312,6 +312,10 @@ def _attach_context(frame: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     known_type = events.loc[events["item_type_clean"].notna()]
     item_type = known_type.groupby("item_identifier_clean")["item_type_clean"].last()
     frame["item_type"] = frame["item_id"].map(item_type)
+
+    known_serial = events.loc[events["host_serial_code_clean"].notna()]
+    host_serial_code = known_serial.groupby("item_identifier_clean")["host_serial_code_clean"].last()
+    frame["host_serial_code"] = frame["item_id"].map(host_serial_code)
     return frame
 
 
