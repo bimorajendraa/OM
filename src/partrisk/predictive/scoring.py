@@ -79,11 +79,18 @@ def record_predictions(
 ) -> int:
     """Tulis satu baris `item_prediction` per PART di `frame` (hasil
     `serving.batch.score_active_parts().frame`). APPEND-ONLY - tidak pernah
-    UPDATE/DELETE baris lama, prediction_id sebelumnya tetap ada."""
+    UPDATE/DELETE baris lama, prediction_id sebelumnya tetap ada.
+
+    Kolom `terminal_id` di sini diisi `frame["terminal_label"]` (serial code
+    fisik terminal, docs/DECISIONS.md §28) - BUKAN `frame["terminal_id"]`
+    (ID internal `terminal_inventory_item_id` yang dipakai jalur live/
+    filtering di serving/batch.py, TIDAK berubah) - supaya aplikasi eksternal
+    yang baca tabel ini bisa mengorelasikan terminal pakai kode yang sama
+    dengan sistem mereka sendiri."""
     rows = [
         (
             run_id,
-            None if pd.isna(row.get("terminal_id")) else str(row["terminal_id"]),
+            None if pd.isna(row.get("terminal_label")) else str(row["terminal_label"]),
             row.get("item_model_code"),
             row["item_id"],
             float(row["failure_probability_30d"]),
@@ -123,6 +130,7 @@ def run_and_persist() -> dict:
     `score-and-persist`. Kegagalan DI TENGAH scoring dicatat sebagai
     model_run FAILED, bukan diam-diam hilang.
     """
+    from partrisk.predictive import alerts as alert_engine
     from partrisk.serving import batch as serving_batch
 
     model_version = None
@@ -135,9 +143,22 @@ def run_and_persist() -> dict:
         row_count = record_predictions(run_id, scores.frame, model_version, scored_at)
         complete_run(run_id, row_count)
         logger.info("model_run %s selesai: %d baris disimpan", run_id, row_count)
-        return {"run_id": run_id, "row_count": row_count, "model_version": model_version}
     except Exception as error:  # noqa: BLE001
         logger.exception("model_run gagal")
         if run_id is not None:
             fail_run(run_id, str(error))
         raise
+
+    # Evaluasi alert SETELAH model_run tercatat SUCCEEDED - kegagalan di sini
+    # tidak mengubah status run (prediksi sudah aman tersimpan), tapi tetap
+    # dilaporkan keras (raise), bukan ditelan diam-diam.
+    opened_alert_ids = alert_engine.evaluate_and_open(scores.frame, scored_at)
+    if opened_alert_ids:
+        logger.info("run_id %s membuka %d alert baru: %s", run_id, len(opened_alert_ids), opened_alert_ids)
+
+    return {
+        "run_id": run_id,
+        "row_count": row_count,
+        "model_version": model_version,
+        "opened_alert_ids": opened_alert_ids,
+    }

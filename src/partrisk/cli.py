@@ -62,10 +62,6 @@ _score_persist_logger = logging.getLogger("score_and_persist")
 
 
 def _score_and_persist_main() -> int:
-    """Satu siklus scheduled scoring: skor seluruh PART aktif, simpan sebagai
-    model_run + item_prediction baru di schema `predictive` (Milestone 2).
-    Dipanggil scheduler eksternal (cron/Task Scheduler) secara berkala -
-    lihat docs/DATABASE.md."""
     started = time.time()
     try:
         result = predictive_scoring.run_and_persist()
@@ -73,8 +69,9 @@ def _score_and_persist_main() -> int:
         _score_persist_logger.exception("score-and-persist gagal")
         return 1
     _score_persist_logger.info(
-        "run_id=%s model_version=%s row_count=%d selesai dalam %.1f detik",
-        result["run_id"], result["model_version"], result["row_count"], time.time() - started,
+        "run_id=%s model_version=%s row_count=%d alert_baru=%d selesai dalam %.1f detik",
+        result["run_id"], result["model_version"], result["row_count"],
+        len(result["opened_alert_ids"]), time.time() - started,
     )
     return 0
 

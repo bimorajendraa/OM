@@ -16,7 +16,6 @@ from partrisk.core import config
 from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
 from partrisk.engines import predict as failure_model
-from partrisk.serving import alerts as alert_store
 from partrisk.serving import single as serving
 
 logger = logging.getLogger(__name__)
@@ -223,6 +222,24 @@ def _compute(generation_value: int) -> BatchScores:
     )
 
 
+_SOURCE_COLUMNS = [
+    "item_model_code_clean",
+    "days_since_installation",
+    "total_prior_events",
+    "prior_failure_count",
+    "prior_failure_365d",
+    "prior_corrective_count",
+    "prior_corrective_30d",
+    "days_since_last_corrective",
+    "prior_distinct_places",
+    "previous_cycle_lifetime_mean",
+    "has_previous_cycle",
+    "log_model_failures_90d",
+    "model_failure_rate_90d",
+    "log_model_fleet_size",
+]
+
+
 def _score_failure(
     cycles: pd.DataFrame, events: pd.DataFrame, episodes: pd.DataFrame, data_end: pd.Timestamp
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -280,15 +297,7 @@ def _score_failure(
         result["failure_probability_30d"] >= gate_threshold if gate_threshold is not None else False
     )
 
-    flagged = result.loc[result["gate_flagged"]]
-    alert_store.register_flagged(
-        flagged["item_id"], flagged["failure_probability_30d"],
-        gate_threshold, metadata["model_version"],
-    )
-    result = alert_store.annotate(result)
-    result["in_official_queue"] = result["gate_flagged"] | result["alert_status"].eq("OPEN")
-
-    features_by_item = snapshot[serving.SOURCE_COLUMNS].copy()
+    features_by_item = snapshot[_SOURCE_COLUMNS].copy()
     features_by_item.index = pd.Index(
         snapshot["item_identifier_clean"].to_numpy(), name="item_id"
     )
@@ -332,144 +341,3 @@ def _attach_recommendation(frame: pd.DataFrame) -> pd.DataFrame:
     frame["recommended_action"] = [decision["action"] for decision in decisions]
     frame["recommendation_message"] = [decision["message"] for decision in decisions]
     return frame
-
-
-def filter_scores(
-    frame: pd.DataFrame,
-    risk: str | None = None,
-    priority: str | None = None,
-    item_type: str | None = None,
-    client: str | None = None,
-    location: str | None = None,
-    terminal_id: str | None = None,
-    part_type: str | None = None,
-    search: str | None = None,
-    official_queue_only: bool = True,
-) -> pd.DataFrame:
-    result = frame
-
-    if official_queue_only:
-        result = result[result["in_official_queue"]]
-    if search:
-        result = result[
-            result["item_id"].str.contains(search.strip().upper(), regex=False, na=False)
-        ]
-    if risk:
-        result = result[result["failure_risk_level"].eq(risk.upper())]
-    if priority:
-        result = result[result["priority"].eq(priority.upper())]
-    if item_type:
-        result = result[result["item_type"].fillna("").str.upper().eq(item_type.upper())]
-    if client:
-        result = result[result["client"].fillna("").str.upper().eq(client.upper())]
-    if location:
-        result = result[result["location"].fillna("").str.upper().eq(location.upper())]
-    if terminal_id:
-        result = result[result["terminal_id"].astype("string").eq(str(terminal_id))]
-    if part_type:
-        result = result[result["item_model_code"].fillna("").str.upper().eq(part_type.upper())]
-    return result
-
-
-def summary(frame: pd.DataFrame) -> dict:
-    levels = frame["failure_risk_level"].value_counts()
-    return {
-        "active_parts": int(len(frame)),
-
-        "official_queue_size": int(frame["in_official_queue"].sum()),
-        "high_risk_parts": int(levels.get("HIGH", 0)),
-        "medium_risk_parts": int(levels.get("MEDIUM", 0)),
-        "low_risk_parts": int(levels.get("LOW", 0)),
-        "priority_counts": {
-            str(name): int(count)
-            for name, count in frame["priority"].value_counts().items()
-        },
-
-        "expected_failures_by_horizon": {
-            f"{days}d": round(float(frame[f"failure_probability_{days}d"].sum()), 1)
-            for days in config.PREDICTION_HORIZON_DAYS
-        },
-    }
-
-
-_TERMINAL_COLUMNS = [
-    "terminal_id", "terminal_label", "terminal_model_name", "active_parts",
-    "high_risk_parts", "medium_risk_parts", "low_risk_parts",
-    "top_risk_item_id", "top_risk_probability", "location",
-]
-
-
-def terminal_overview(frame: pd.DataFrame) -> dict:
-    return {
-        "terminals": int(frame.loc[frame["terminal_id"].notna(), "terminal_id"].nunique()),
-        "parts_with_terminal": int(frame["terminal_id"].notna().sum()),
-        "parts_without_terminal": int(frame["terminal_id"].isna().sum()),
-    }
-
-
-def terminal_summary(frame: pd.DataFrame) -> pd.DataFrame:
-
-    known = frame.loc[frame["terminal_id"].notna()].copy()
-    if known.empty:
-        return pd.DataFrame(columns=_TERMINAL_COLUMNS).set_index("terminal_id")
-
-    prob_column = f"failure_probability_{config.TARGET_HORIZON_DAYS}d"
-    grouped = known.groupby("terminal_id").agg(
-        terminal_label=("terminal_label", "first"),
-        terminal_model_name=("terminal_model_name", "first"),
-        location=("location", "first"),
-        active_parts=("item_id", "count"),
-        high_risk_parts=("failure_risk_level", lambda s: int((s == "HIGH").sum())),
-        medium_risk_parts=("failure_risk_level", lambda s: int((s == "MEDIUM").sum())),
-        low_risk_parts=("failure_risk_level", lambda s: int((s == "LOW").sum())),
-    )
-
-    top_risk = (
-        known.sort_values("tier_score", ascending=False)
-        .groupby("terminal_id")
-        .first()[["item_id", prob_column]]
-        .rename(columns={"item_id": "top_risk_item_id", prob_column: "top_risk_probability"})
-    )
-
-    grouped = grouped.join(top_risk)
-    return grouped.sort_values(
-        ["high_risk_parts", "medium_risk_parts"], ascending=False
-    )
-
-
-_TERMINAL_PART_COLUMNS = [
-    "part_type", "installed_count", "high_risk_parts", "medium_risk_parts",
-    "low_risk_parts", "open_alert_count",
-]
-
-
-def terminal_part_summary(frame: pd.DataFrame, terminal_id: str) -> pd.DataFrame:
-    known = frame.loc[
-        frame["terminal_id"].astype("string").eq(str(terminal_id))
-        & frame["item_model_code"].notna()
-    ].copy()
-    if known.empty:
-        return pd.DataFrame(columns=_TERMINAL_PART_COLUMNS).set_index("part_type")
-
-    grouped = known.groupby("item_model_code").agg(
-        installed_count=("item_id", "count"),
-        high_risk_parts=("failure_risk_level", lambda s: int((s == "HIGH").sum())),
-        medium_risk_parts=("failure_risk_level", lambda s: int((s == "MEDIUM").sum())),
-        low_risk_parts=("failure_risk_level", lambda s: int((s == "LOW").sum())),
-        open_alert_count=("alert_status", lambda s: int((s == "OPEN").sum())),
-    )
-    grouped.index.name = "part_type"
-    return grouped.sort_values(["high_risk_parts", "medium_risk_parts"], ascending=False)
-
-
-def facets(frame: pd.DataFrame) -> dict[str, list[str]]:
-    def values(column: str) -> list[str]:
-        return sorted(frame[column].dropna().astype(str).unique().tolist())
-
-    return {
-        "risk_levels": ["HIGH", "MEDIUM", "LOW"],
-        "priorities": ["HIGH", "MEDIUM", "LOW"],
-        "item_types": values("item_type"),
-        "clients": values("client"),
-        "locations": values("location"),
-    }

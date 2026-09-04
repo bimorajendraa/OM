@@ -1,13 +1,11 @@
-# Dependensi lapisan serving (API + dashboard).
+# Dependensi lapisan serving (API).
 #
 # Terpisah dari requirements.txt supaya mesin yang hanya menjalankan training
-# tidak perlu memasang FastAPI dan Streamlit.
+# tidak perlu memasang FastAPI.
 -r requirements.txt
 
 fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
-streamlit>=1.38,<2
-requests>=2.32,<3
 
 # Connection pool database untuk API (lihat api/services/db_pool.py) - bukan
 # dipakai predict.py/train.py, yang tetap memanggil psycopg.connect() langsung.

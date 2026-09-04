@@ -1100,3 +1100,376 @@ retry dengan `external_event_id` yang sama mengembalikan baris pertama
 (bukan baris baru) - lihat `tests/test_predictive.py`.
 
 ---
+
+## 26 · Alert persisten - Prediction -> Alert -> Resolve -> Suppression -> Re-alert (Milestone 5)
+
+**Status**: berlaku, 2026-09-03. `migrations/predictive/0003_alerts.sql`,
+`src/partrisk/predictive/alerts.py`. Menggantikan `serving/alerts.py`
+(in-memory, §17 - SUPERSEDED sepenuhnya oleh milestone ini, dipertahankan
+apa adanya di dokumen sesuai konvensi append-only) - status alert sekarang
+selamat dari restart proses, sesuai definition-of-done master prompt §38.
+
+**Tiga fungsi, tiga tanggung jawab terpisah tegas** (docs §2 master prompt -
+"jangan mencampur ketiganya"):
+- `evaluate_and_open()` - satu-satunya yang MEMBUKA alert, dipanggil SEKALI
+  per siklus `predictive/scoring.py::run_and_persist()` (scheduled scoring,
+  `score-and-persist`). TIDAK PERNAH dipanggil dari jalur baca live.
+- `open_alerts_by_item()` - MURNI BACA, dipakai `serving/batch.py` untuk
+  menandai `alert_id`/`alert_status`/`alert_score_at_open` di response
+  API/dashboard. `serving/batch.py::_score_failure()` yang SEBELUMNYA
+  memanggil `alert_store.register_flagged()` (MENULIS) di setiap
+  `score_active_parts()` sekarang HANYA membaca - konsekuensi langsung dari
+  pemisahan scheduled-write vs live-read yang sudah diputuskan Milestone 2
+  (`docs/DECISIONS.md` §22, alasan yang sama: batch ad-hoc/test/API
+  on-demand tidak boleh ikut menulis state).
+- `resolve_with_intervention()` - satu-satunya yang MERESOLVE, SELALU
+  lewat intervention tercatat (endpoint `POST /api/v1/alerts/{alert_id}/
+  interventions`, satu-satunya endpoint publik yang dibutuhkan - sesuai
+  klarifikasi user bahwa GET tidak perlu karena aplikasi eksternal baca
+  database langsung).
+
+**Resolve TIDAK PERNAH mengubah `item_prediction` historis** (docs §19
+master prompt, invariant paling ditekankan di seluruh refactor ini) -
+`resolve_with_intervention()` HANYA mengubah `alert.status`/`resolved_at`/
+`resolution_reason`/`suppression_until`. Skor 0,72 yang memicu alert tetap
+0,72 selamanya di `item_prediction`, walau alertnya sudah RESOLVED.
+
+**Identitas alert** = `(item_id, cycle_id, intervention_seq)` (docs §16),
+bukan cuma `item_id`. `alert.intervention_seq` disetel ke seq yang AKAN
+didapat intervention yang menyelesaikannya (dihitung sama seperti
+`interventions.py::_next_intervention_seq()` saat alert dibuka) - invariant
+ini membuat unique index `(item_id, cycle_id, intervention_seq) WHERE
+status='OPEN'` otomatis mencegah duplikat DAN otomatis membuat re-alert
+jadi baris/ID baru (episode intervention_seq lebih tinggi), tanpa logic
+tambahan untuk "apakah ini alert baru atau lama" (docs §24 - "alert
+berikutnya adalah alert baru, jangan reopen record lama").
+
+**Suppression & emergency override** (docs §24/§25): `ALERT_SUPPRESSION_
+DAYS=14`, `ALERT_EMERGENCY_SCORE_JUMP=0.30`, `ALERT_EMERGENCY_SCORE_
+ABSOLUTE=0.80` di `core/config.py` - **PLACEHOLDER eksplisit**, BEDA dari
+`FAILURE_GATE_TARGET_PRECISION` (lewat 13+ eksperimen terdokumentasi,
+`docs/EXPERIMENTS.md`) - belum ada riwayat resolve/re-alert produksi sama
+sekali untuk divalidasi sebelum milestone ini berjalan. Emergency override
+membandingkan skor sekarang terhadap `opened_score` alert TERAKHIR yang
+di-resolve untuk item+cycle yang sama (bukan terhadap ambang gerbang
+presisi `FAILURE_GATE_TARGET_PRECISION`, dan bukan terhadap
+`suppression_until`). **Wajib direvisit begitu ada data resolve nyata.**
+
+**Transaksi & idempotency** (docs §22/§23): `resolve_with_intervention()`
+satu `with db.connect()` - validasi alert (lock `FOR UPDATE`) -> validasi
+cycle masih sama (`AlertCycleMismatch` kalau item sudah pindah cycle sejak
+alert dibuka - lihat WHY di kode) -> insert intervention -> update alert ->
+insert 2 alert_event (INTERVENTION_RECORDED, RESOLVED) -> commit. Gagal di
+tengah = ROLLBACK penuh (properti transaksi Postgres, tidak ada
+try/except manual). Idempotent lewat `(external_system, external_event_id)`
+- retry mengembalikan hasil yang SAMA (intervention + alert saat itu),
+bukan mencoba insert lagi.
+
+**API - hanya POST, sesuai klarifikasi user**: `GET /api/v1/alerts` atau
+`GET /api/v1/alerts/{alert_id}` **SENGAJA TIDAK dibuat** - aplikasi
+eksternal akan baca terminal/part/item/alert langsung dari database
+(schema `predictive` perlu grant read-only untuk itu, dicatat sebagai
+pekerjaan Milestone 6/7, BELUM dikerjakan). `PriorityItem` (`/recommendations`,
+dipakai dashboard) dapat field `alert_id` baru; `alert_threshold_at_open`/
+`alert_model_version` (field lama dari in-memory alert) DIHAPUS - tidak ada
+kolom setara di `predictive.alert`, dan tidak ada consumer yang
+memakainya (dashboard tidak pernah menampilkannya).
+
+**Belum dikerjakan** (di luar scope pass ini, dicatat supaya tidak
+hilang): `ACKNOWLEDGED`/`SUPPRESSED`/`NEW_ALERT_CREATED` sebagai
+`alert_event.event_type` disediakan di CHECK constraint status tapi belum
+ada jalur kode yang menulisnya (tidak ada endpoint "acknowledge" terpisah -
+belum ada kebutuhan konkret). Grant read-only schema `predictive` untuk
+aplikasi eksternal (Milestone 6/7). `alert.prediction_id` selalu NULL -
+`predictive/scoring.py::record_predictions()` pakai `executemany` tanpa
+`RETURNING` per baris, jadi prediction_id per item tidak pernah diambil
+balik untuk ditautkan; field ini nullable dan informasional saja, tidak
+menghalangi apa pun yang sudah berjalan.
+
+---
+
+## 27 · Auto-resolve alert saat cycle operasional tertutup - dua jalur resolve, bukan satu
+
+**Status**: berlaku, 2026-09-03. `src/partrisk/predictive/alerts.py`.
+Melengkapi §26 (Milestone 5) - bukan mengganti `resolve_with_intervention()`,
+menambah jalur kedua.
+
+**Masalah**: `resolve_with_intervention()` (§26) mengasumsikan SETIAP
+perbaikan yang menutup alert akan tercatat lewat intervention (endpoint
+`POST /api/v1/alerts/{alert_id}/interventions`). User mengoreksi asumsi
+ini: ada dua skenario nyata di lapangan, bukan satu -
+1. Teknisi melakukan worktype corrective/preventive yang berujung status
+   dismantle (perbaikan besar/swap) - ini SUDAH tercatat di data
+   operasional (`journal`/`installation_cycle` lewat event
+   FAILURE/RETURNED/DISMANTLED, ditutup sebagai `cycle_end_reason` oleh
+   §20). Memaksa teknisi mem-POST intervention manual untuk kejadian yang
+   sudah tercatat sistem adalah kerja ganda.
+2. Perbaikan kecil yang TIDAK PERNAH tercatat operasional (mis. mengencang-
+   kan baut) - item tetap di cycle yang sama, tidak ada event apa pun di
+   data operasional. Satu-satunya sinyal bahwa alert harus mati adalah
+   intervention manual - jalur §26 yang sudah ada.
+
+Sebelum perbaikan ini, alert pada skenario 1 tidak pernah mati otomatis -
+`resolve_with_intervention()` yang dipanggil belakangan (mis. karena
+teknisi lain mencoba mem-POST) hanya menghasilkan `AlertCycleMismatch`
+mentah (item sudah pindah cycle sejak alert dibuka), tanpa menjelaskan
+KENAPA - padahal itu justru tanda alert seharusnya sudah selesai.
+
+**Keputusan - dua jalur resolve, tanggung jawab tetap terpisah tegas
+(docs §2 master prompt, sama seperti §26)**:
+- **Otomatis** (`auto_resolve_closed_cycles()`, fungsi baru) - untuk
+  skenario 1. Membaca `predictive.item_cycle.is_active`/`end_reason`
+  (hasil sinkronisasi `cycles.py::sync_item_cycles()` dari data
+  operasional, §25) untuk cycle alert yang masih OPEN; kalau cycle sudah
+  tertutup (`is_active=false`), alert langsung di-`UPDATE` ke RESOLVED
+  dengan `resolution_reason=f"OPERATIONAL_CYCLE_CLOSED:{end_reason}"`
+  (mis. `OPERATIONAL_CYCLE_CLOSED:FAILURE`) - TANPA intervention row, TANPA
+  panggilan API apa pun. Dipanggil di dua tempat: (a) langkah pertama
+  `evaluate_and_open()` (proaktif, menyapu semua alert OPEN sebelum
+  membuka alert baru, supaya tidak menumpuk alert basi), (b) reaktif di
+  dalam `resolve_with_intervention()` saat terdeteksi cycle mismatch -
+  kalau ternyata cycle-nya memang sudah tertutup operasional, alert
+  di-auto-resolve dulu lalu fungsi melempar `AlertNotOpen` (bukan lagi
+  `AlertCycleMismatch` mentah) supaya caller tahu alert SUDAH selesai,
+  bukan error yang tidak jelas maknanya.
+- **Manual** (`resolve_with_intervention()`, §26, TIDAK berubah
+  perilakunya untuk skenario 2) - tetap satu-satunya jalur untuk
+  perbaikan yang tidak pernah muncul di data operasional. `AlertCycleMismatch`
+  masih bisa terjadi untuk kasus lain yang genuinely tidak terjelaskan
+  (item pindah cycle karena alasan yang bukan FAILURE/RETURNED/DISMANTLED
+  yang dikenali `end_reason`) - kini kasusnya jauh lebih sempit karena
+  penyebab paling umum (cycle ditutup event operasional biasa) sudah
+  ditangkap otomatis lebih dulu.
+
+**Kenapa TIDAK ada endpoint/tabel baru**: skenario 1 murni derivasi dari
+data operasional yang sudah dibaca `item_cycle` (§25) - tidak ada
+informasi baru yang perlu disimpan, jadi tidak ada migrasi/kolom baru.
+`resolution_reason` yang membedakan asal-usul resolve (`OPERATIONAL_
+CYCLE_CLOSED:*` vs `INTERVENTION_RECORDED`) cukup di kolom teks yang
+sudah ada di `predictive.alert` sejak §26.
+
+**Verifikasi**: `tests/test_predictive.py::
+test_auto_resolve_closed_cycles_menutup_alert_pada_cycle_yang_sudah_berakhir`
+dan `::test_resolve_with_intervention_auto_resolve_alert_pada_cycle_lama`
+- keduanya memakai cycle historis SUNGGUHAN dari database (fixture
+`closed_cycle`, dicari lewat `data_reader.get_cycles()` untuk baris dengan
+`cycle_end_reason != RIGHT_CENSORED_AT_DATA_END`) dengan alert sintetis
+yang di-insert manual lalu dibersihkan lewat fixture `cleanup_alert_ids` -
+bukan mengarang data operasional, murni membuktikan alert engine bereaksi
+benar terhadap cycle yang SUDAH tertutup nyata.
+
+---
+
+## 28 · Endpoint intervention diidentifikasi lewat host_serial_code, bukan alert_id - tabel alert_event dan kolom intervention yang mati dibuang
+
+**Status**: berlaku, 2026-09-03. Hasil klarifikasi user setelah rapat tim.
+Menggantikan sebagian §26 (bentuk endpoint `POST /api/v1/alerts/{alert_id}/
+interventions`) dan §21 master prompt (body request).
+
+**Masalah**: endpoint intervention sebelumnya mengharuskan `alert_id`
+internal di path URL. Tapi §26 sudah menetapkan TIDAK ADA `GET /alerts` -
+aplikasi eksternal baca database langsung untuk kebutuhan GET. Kalau
+aplikasi eksternal memang tidak dirancang membaca schema `predictive`
+untuk kasus ini, mereka tidak akan pernah tahu `alert_id` yang harus
+dikirim - endpoint jadi tidak bisa dipakai dari sisi mereka. User
+mengklarifikasi: body-nya cukup `host_serial_code` - label fisik PART
+(format MODEL-PAIRINGCODE-REPAIRSEQ, kolom `journal.t_item_journey.
+host_serial_code`, dibaca teknisi langsung dari kode PART) yang aplikasi
+eksternal SUDAH tahu tanpa perlu query tambahan ke schema `predictive`.
+Field lain (outcome/action_code/remark/external_system/dst) SENGAJA
+dihapus juga - "body betul-betul cuma serial code" (keputusan eksplisit,
+trade-off: tidak ada lagi idempotency key eksternal, retry POST akan
+membuat baris intervention baru, bukan dikembalikan hasil yang sama).
+
+**Implementasi**:
+- `core/data_reader.py::resolve_item_by_host_serial_code(host_serial_code)`
+  - lookup baru, cari `item_id` internal (item_identifier_clean) dari
+  `journal.t_item_journey` lewat `host_serial_code`, ambil catatan
+  TERBARU yang cocok (host_serial_code menyertakan repair_seq yang bisa
+  berubah tiap perbaikan besar - PART fisik yang sama bisa punya beberapa
+  host_serial_code berbeda sepanjang riwayatnya, jadi harus match yang
+  paling baru, bukan yang pertama ditemukan).
+- `predictive/alerts.py::resolve_by_item(item_id, performed_at)` - fungsi
+  baru, titik masuk endpoint. Kalau item ini SEDANG punya alert OPEN,
+  delegasi penuh ke `resolve_with_intervention()` (logic sama persis,
+  tidak diduplikasi). Kalau TIDAK ada alert OPEN, tetap catat intervention
+  langsung (satu POST tetap berarti ada perbaikan, §25) - `alert: null` di
+  respons, tidak ada yang perlu ditutup.
+- Endpoint pindah dari `POST /api/v1/alerts/{alert_id}/interventions` ke
+  `POST /api/v1/interventions` (top-level, bukan lagi sub-resource
+  alert) - body `{"host_serial_code": "..."}`, `performed_at` diambil dari
+  waktu server menerima request (tidak dikirim caller). 404 kalau
+  `host_serial_code` tidak ditemukan (`PartNotFound`, pola yang sama
+  dengan endpoint lain); 404 juga kalau item ditemukan tapi tidak sedang
+  punya installation cycle aktif sama sekali (`ItemNotInstalled`,
+  exception handler baru - sebelumnya tidak terdaftar karena jalur ini
+  belum pernah tercapai dari HTTP).
+
+**Konsekuensi pada skema `predictive.intervention`**: kolom `outcome`,
+`action_code`, `remark`, `external_system`, `external_work_order_id`,
+`external_inspection_id`, `external_event_id` DIBUANG (`migrations/
+predictive/0002_lifecycle.sql` diedit langsung, bukan migrasi ALTER baru -
+tabel ini belum pernah menampung data production, sama seperti alasan
+penghapusan kolom `type` di §25) - field itu tidak akan pernah terisi lagi
+karena body endpoint sudah tidak mengirimkannya. Sisa kolom: `intervention_id`,
+`item_id`, `cycle_id`, `intervention_seq`, `alert_id`, `performed_at`,
+`created_at`. `interventions.py::record_intervention()` disederhanakan jadi
+`(item_id, performed_at, alert_id=None) -> dict` (bukan lagi
+`tuple[dict, bool]` - tidak ada lagi status "created vs replay idempotent"
+untuk dilaporkan). `find_by_external_event()` dihapus (tidak ada lagi
+kolom untuk dicari).
+
+**Tabel `predictive.alert_event` DIHAPUS SEPENUHNYA** (bukan cuma
+dikosongkan) - ditemukan saat diskusi ulang desain: tidak ada satu pun
+kode yang PERNAH membaca tabel ini (murni ditulis di OPENED/
+INTERVENTION_RECORDED/RESOLVED), dan seluruh informasi yang dicatatnya
+sudah tersedia langsung di kolom `alert.opened_at`/`resolved_at`/
+`resolution_reason` - tabel terpisah cuma menduplikasi data tanpa
+consumer nyata. `alerts.py` tidak lagi meng-import `json` sama sekali
+(satu-satunya pemakaiannya adalah `metadata` JSONB tabel ini).
+`evaluate_and_open()` juga tidak lagi butuh parameter `run_id` (dulu
+hanya dipakai untuk metadata alert_event) - signature jadi
+`evaluate_and_open(frame, scored_at)`.
+
+**Kenapa alert TIDAK digabung jadi kolom di `item_prediction`** (dibahas
+ulang di sesi ini, ditolak): `item_prediction` APPEND-ONLY (tidak pernah
+di-UPDATE, itu jaminan §19), sementara alert PERLU berubah status
+(OPEN->RESOLVED) - kalau digabung, resolve alert berarti meng-UPDATE baris
+prediksi historis yang seharusnya beku selamanya. Umur satu alert juga
+bisa melintasi BEBERAPA baris `item_prediction` (dibuka di satu siklus
+scoring bulanan, baru resolve beberapa siklus kemudian) - tidak ada
+pemetaan 1:1 yang bersih ke satu baris prediksi. Dan ritme tulisnya beda
+total: `item_prediction` ditulis sekali sebulan lewat batch, alert bisa
+berubah kapan saja lewat API - mencampur keduanya berarti tabel
+append-only jadi punya kolom yang sering di-UPDATE, bertentangan dengan
+tujuan tabel itu sendiri.
+
+**Kenapa `item_prediction.terminal_id` (dan `alert.terminal_id`) sekarang
+diisi serial code, bukan ID internal**: `predictive/scoring.py::
+record_predictions()` dan `predictive/alerts.py::evaluate_and_open()`
+sebelumnya menulis `frame["terminal_id"]` (ID internal
+`terminal_inventory_item_id`, dari `serving/batch.py::_attach_terminal()`)
+ke kolom `terminal_id` di kedua tabel. Diubah jadi menulis
+`frame["terminal_label"]` (serial code fisik terminal, `terminal_serial_
+code_clean` dari §14 - SUDAH dihitung di frame yang sama, tidak ada query
+baru) - supaya aplikasi eksternal yang baca tabel `predictive` langsung
+bisa mengorelasikan terminal pakai kode yang sama dengan sistem mereka
+sendiri, bukan ID yang cuma berarti di database ini. **Hanya memengaruhi
+apa yang DITULIS ke `item_prediction`/`alert`** - `serving/batch.py`'s
+frame (`frame["terminal_id"]`, dipakai live filtering/grouping di
+`filter_scores()`/`terminal_summary()`/API `PriorityItem.terminal_id`)
+TIDAK berubah sama sekali, jadi tidak ada dampak ke dashboard/API live.
+Kolom database TETAP bernama `terminal_id` (tidak di-rename) - isinya saja
+yang beda makna sekarang, dicatat di sini supaya tidak membingungkan
+pembaca tabel di masa depan.
+
+**Belum dikerjakan** (di luar scope pass ini): kolom `alert.item_id`/
+`item_prediction.item_id` TETAP ID internal (`item_identifier_clean`,
+dipakai FK ke `item_cycle` di seluruh schema `predictive`) - TIDAK diganti
+`host_serial_code`, karena `host_serial_code` bisa berubah antar perbaikan
+(menyertakan repair_seq) sementara `item_id` harus stabil sepanjang umur
+PART untuk keperluan join. Kalau aplikasi eksternal butuh korelasi PART
+lewat serial code juga (bukan cuma terminal), itu keputusan terpisah
+(kemungkinan kolom baru `item_serial_code`, informasional saja, tidak
+menggantikan `item_id`) - belum diminta user, belum dikerjakan.
+
+---
+
+## 29 · Dashboard dan seluruh endpoint GET dihapus - API cuma /health + POST /api/v1/interventions
+
+**Status**: berlaku, 2026-09-04. SUPERSEDED sebagian dari §14/§15/§19/§26/§28
+(bagian yang menyebut dashboard/endpoint GET, `PriorityItem`, `filter_scores()`,
+`terminal_summary()`, dst - dipertahankan apa adanya di dokumen sesuai
+konvensi append-only, tidak berlaku lagi untuk bagian yang dihapus di sini).
+
+**Keputusan user**: aplikasi eksternal lain akan jadi consumer utama yang
+membaca schema `predictive` langsung dari database (§26/§28) - dashboard
+Streamlit ini pada dasarnya melakukan hal yang SAMA (menampilkan hasil
+prediksi ke manusia lewat HTTP ke API), jadi mempertahankan keduanya berarti
+dua kali kerja maintenance untuk satu fungsi yang tumpang tindih. Diputuskan:
+**hapus dashboard, dan API GET yang HANYA ada untuk melayani dashboard itu**.
+
+**Dihapus sepenuhnya**:
+- `dashboard/` (seluruh direktori - Streamlit `app.py`, `pages/`, `ui.py`,
+  `api_client.py`, `.streamlit/`).
+- Router API: `model_info_router` (`GET /api/v1/model` - sudah jadi dead
+  code lebih dulu sejak `6_Sistem.py` dihapus, §24), `prediction_router`
+  (`GET /api/v1/parts/{item_id}/failure|history|assessment`),
+  `recommendations_router` (`GET /api/v1/recommendations|overview|filters|
+  terminals|terminals/{id}/parts|terminals/{id}/parts/{part_type}`).
+- `serving/single.py`: seluruh fungsi single-item prediction/explanation
+  (`predict_failure`, `get_part_assessment`, `explain`, `risk_factors`,
+  `caveats`, `item_history`, `failure_history`, `location_history`,
+  `_active_snapshot`, `_feature_row`, `_guard`, `_exists`, `_translate`,
+  `describe`) dan kelas `PartNotScorable` - SEMUA murni pendukung endpoint
+  yang baru dihapus. Modul ini sekarang HANYA berisi exception bersama
+  (`PartNotFound`, `ModelUnavailable`, `DataSourceUnavailable`) dan metadata
+  model (`failure_metadata`/`versions`/`warmup`) yang masih dipakai
+  `/health` dan scoring internal - nama file dipertahankan `single.py`
+  walau isinya sudah bukan lagi "prediksi satu PART" (rename dianggap
+  cosmetic, di luar scope pass ini).
+- `serving/batch.py`: `filter_scores()`, `summary()`, `terminal_overview()`,
+  `terminal_summary()`, `terminal_part_summary()`, `facets()` - SEMUA murni
+  dipakai endpoint yang dihapus, TIDAK dipakai `predictive/scoring.py`
+  ataupun `cli.py`. Juga blok enrichment status alert di `_score_failure()`
+  (`open_alerts_by_item()`, kolom `alert_id`/`alert_status`/`alert_opened_at`/
+  `alert_score_at_open`/`in_official_queue`) - murni untuk tampilan live
+  API/dashboard, TIDAK ditulis ke `item_prediction` (`record_predictions()`)
+  ataupun dipakai `evaluate_and_open()` (yang baca status alert dari
+  `predictive.alert` langsung, bukan dari frame). Import
+  `predictive.alerts` di `batch.py` ikut dibuang (satu-satunya pemakainya
+  blok ini).
+- `api/schemas.py`: `FailurePrediction`, `Recommendation`, `RiskFactor`,
+  `Explanation`, `FailureResponse`, `AssessmentResponse`, `PriorityItem`,
+  `ScoredAt`, `RecommendationListResponse`, `OverviewResponse`,
+  `FiltersResponse`, `FailureHistoryItem`, `LocationHistoryItem`,
+  `HistoryResponse`, `TerminalSummaryItem`, `TerminalListResponse`,
+  `TerminalPartSummaryItem`, `TerminalPartListResponse`, dan type alias
+  `RiskLevel`/`Priority`/`ScoringStatus` yang cuma dipakai kelas-kelas itu.
+- `docker-compose.yml`: service `dashboard` dibuang. `requirements-serving.txt`:
+  `streamlit`/`requests` dibuang (`requests` khusus dipakai
+  `dashboard/api_client.py`, tidak ada pemakai lain).
+- Test: `tests/test_serving.py` dihapus (AppTest Streamlit + unit test
+  fungsi yang ikut dihapus). Diganti `tests/test_batch.py` (baru, ringkas) -
+  cuma menyimpan test yang MASIH relevan: `recommend()` (§ di bawah) dan
+  `_attach_terminal()` (masih dipakai internal). `tests/test_api.py`
+  dipangkas drastis - sisa test health/CORS/API-key/training-endpoint-tidak-
+  ada/intervention saja, test API-key direwrite pakai `POST /api/v1/
+  interventions` (satu-satunya router berdependency `require_api_key` yang
+  tersisa, sebelumnya pakai `GET /api/v1/model`).
+- `tests/conftest.py`: fixture `not_scorable_item` dibuang (tidak ada test
+  yang masih memakainya setelah endpoint assessment/dashboard hilang).
+
+**SENGAJA DIPERTAHANKAN meski awalnya terlihat seperti kandidat hapus** -
+audit ulang sebelum eksekusi menemukan dependency nyata dari `cli.py`
+(tooling standalone, TIDAK terkait dashboard/API sama sekali) terhadap
+sebagian fungsi `batch.py` yang HAMPIR ikut terhapus:
+- `serving.recommend()`/`RISK_LEVELS`/`_RECOMMENDATION_TABLE` (single.py) -
+  dipakai `batch.py::_attach_recommendation()` yang mengisi kolom
+  `priority`/`recommended_action` yang DICETAK `cli.py predict` (`_predict_main`).
+- `batch.py::_attach_context()` - mengisi kolom `item_type` yang juga
+  dicetak `cli.py predict`.
+- `batch.py::_attach_recommendation()` sendiri.
+- `BatchScores.snapshot` (dan `_score_failure()` mengembalikan tuple
+  `(result, features_by_item)`, bukan cuma `result`) - dipakai
+  `cli.py golden-batch generate/compare` (oracle regresi, `_SOURCE_COLUMNS`
+  dipindah dari `single.py` ke `batch.py` karena satu-satunya pemakainya
+  sekarang di sana). Tanpa audit ini, `golden-batch` dan `predict --top`
+  akan pecah - kesalahan yang sempat dibuat (fungsi-fungsi ini sempat
+  terhapus) dan diperbaiki dalam pass yang sama setelah `cli.py` dibaca
+  penuh dan dependency-nya ketahuan.
+
+**Yang TIDAK berubah sama sekali**: `predictive/scoring.py`,
+`predictive/alerts.py`, `predictive/cycles.py`, `predictive/interventions.py`,
+seluruh `predictive` schema, `POST /api/v1/interventions` (§28), dan
+`cli.py score-and-persist`/`predict`/`golden-batch`/eksperimen lain - siklus
+scoring bulanan dan alert engine berjalan PERSIS sama seperti sebelumnya,
+sama sekali tidak tersentuh oleh penghapusan ini.
+
+**Verifikasi**: `pytest -q` penuh lolos (89 lulus, 1 skip) setelah
+penghapusan; smoke test manual `python -m partrisk.cli predict --top 3` dan
+`python -m partrisk.cli golden-batch generate --out FILE` dijalankan
+langsung terhadap database nyata untuk membuktikan jalur yang dipertahankan
+benar-benar masih berfungsi, bukan cuma lolos test unit.
+
+---

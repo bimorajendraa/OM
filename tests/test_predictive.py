@@ -3,6 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from partrisk.core import data_reader
+from partrisk.predictive import alerts as alert_engine
 from partrisk.predictive import cycles as cycle_store
 from partrisk.predictive import db as predictive_db
 from partrisk.predictive import interventions
@@ -67,13 +69,13 @@ def test_record_predictions_menulis_baris_sesuai_frame(cleanup_run_ids):
 
     frame = pd.DataFrame([
         {
-            "item_id": "TEST-ITEM-001", "terminal_id": "T1", "item_model_code": "0000001",
+            "item_id": "TEST-ITEM-001", "terminal_label": "T1", "item_model_code": "0000001",
             "failure_probability_30d": 0.1, "failure_probability_60d": 0.2,
             "failure_probability_90d": 0.3, "failure_probability_120d": 0.4,
             "failure_risk_level": "LOW", "gate_flagged": False,
         },
         {
-            "item_id": "TEST-ITEM-002", "terminal_id": None, "item_model_code": "0000002",
+            "item_id": "TEST-ITEM-002", "terminal_label": None, "item_model_code": "0000002",
             "failure_probability_30d": 0.9, "failure_probability_60d": 0.95,
             "failure_probability_90d": 0.97, "failure_probability_120d": 0.99,
             "failure_risk_level": "HIGH", "gate_flagged": True,
@@ -205,44 +207,255 @@ def test_record_intervention_menaikkan_seq_dalam_cycle_yang_sama(
     cleanup_item_lifecycle.append(scorable_item)
     now = pd.Timestamp.now(tz="UTC")
 
-    first, created_first = interventions.record_intervention(
-        scorable_item, now, external_system="TEST", external_event_id="E1"
-    )
-    second, created_second = interventions.record_intervention(
-        scorable_item, now,
-        action_code="TIGHTENING", external_system="TEST", external_event_id="E2",
-    )
+    first = interventions.record_intervention(scorable_item, now)
+    second = interventions.record_intervention(scorable_item, now)
 
-    assert created_first is True and created_second is True
     assert first["cycle_id"] == second["cycle_id"], (
         "minor repair tidak boleh membuka cycle baru - harus dalam cycle aktif yang sama"
     )
     assert second["intervention_seq"] == first["intervention_seq"] + 1
 
 
-@needs_database
-@needs_models
-def test_record_intervention_idempotent_lewat_external_event_id(
-    scorable_item, cleanup_item_lifecycle
-):
-    cleanup_item_lifecycle.append(scorable_item)
-    now = pd.Timestamp.now(tz="UTC")
-
-    first, created_first = interventions.record_intervention(
-        scorable_item, now, external_system="TEST", external_event_id="DUPLICATE"
-    )
-    retry, created_retry = interventions.record_intervention(
-        scorable_item, now, external_system="TEST", external_event_id="DUPLICATE"
-    )
-
-    assert created_first is True
-    assert created_retry is False
-    assert retry["intervention_id"] == first["intervention_id"]
-
+@pytest.fixture
+def cleanup_alert_lifecycle():
+    touched_items: list[str] = []
+    yield touched_items
+    if not touched_items:
+        return
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM predictive.intervention "
-                "WHERE external_system = 'TEST' AND external_event_id = 'DUPLICATE'"
+                "DELETE FROM predictive.intervention WHERE item_id = ANY(%s)", (touched_items,)
             )
-            assert cur.fetchone()[0] == 1
+            cur.execute("DELETE FROM predictive.alert WHERE item_id = ANY(%s)", (touched_items,))
+            cur.execute(
+                "DELETE FROM predictive.item_cycle WHERE item_id = ANY(%s)", (touched_items,)
+            )
+        conn.commit()
+
+
+def _flagged_frame(item_id: str, score: float) -> pd.DataFrame:
+    return pd.DataFrame([{
+        "item_id": item_id, "terminal_id": None, "item_model_code": "0000009",
+        "failure_probability_30d": score, "gate_flagged": True,
+    }])
+
+
+@needs_database
+def test_resolve_with_intervention_alert_tidak_ditemukan():
+    with pytest.raises(alert_engine.AlertNotFound):
+        alert_engine.resolve_with_intervention(999999999, pd.Timestamp.now(tz="UTC"))
+
+
+@needs_database
+@needs_models
+def test_evaluate_and_open_lalu_resolve_lalu_ditolak_kalau_diulang(
+    scorable_item, cleanup_alert_lifecycle
+):
+    cleanup_alert_lifecycle.append(scorable_item)
+    scored_at = pd.Timestamp.now(tz="UTC")
+
+    opened_ids = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
+    assert len(opened_ids) == 1
+    alert_id = opened_ids[0]
+
+    alert = alert_engine.get_alert(alert_id)
+    assert alert["item_id"] == scorable_item
+    assert alert["status"] == "OPEN"
+    assert alert["opened_score"] == 0.5
+
+    result = alert_engine.resolve_with_intervention(alert_id, pd.Timestamp.now(tz="UTC"))
+    assert result["alert"]["status"] == "RESOLVED"
+    assert result["intervention"]["alert_id"] == alert_id
+
+    with pytest.raises(alert_engine.AlertNotOpen):
+        alert_engine.resolve_with_intervention(alert_id, pd.Timestamp.now(tz="UTC"))
+
+
+@needs_database
+@needs_models
+def test_evaluate_and_open_tidak_membuka_ulang_selama_masih_open(
+    scorable_item, cleanup_alert_lifecycle
+):
+    cleanup_alert_lifecycle.append(scorable_item)
+    scored_at = pd.Timestamp.now(tz="UTC")
+
+    first = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
+    second = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.6), scored_at)
+
+    assert len(first) == 1
+    assert second == [], "alert yang masih OPEN tidak boleh dibuka ulang walau skor berubah"
+
+
+@needs_database
+@needs_models
+def test_evaluate_and_open_suppressed_setelah_resolve_kecuali_emergency(
+    scorable_item, cleanup_alert_lifecycle
+):
+    cleanup_alert_lifecycle.append(scorable_item)
+    scored_at = pd.Timestamp.now(tz="UTC")
+
+    opened_ids = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
+    alert_engine.resolve_with_intervention(opened_ids[0], pd.Timestamp.now(tz="UTC"))
+
+    # skor naik sedikit - masih dalam masa suppression, BUKAN emergency jump.
+    suppressed = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.55), scored_at)
+    assert suppressed == [], "re-alert seharusnya ditahan selama masa suppression"
+
+    # skor melonjak tajam (emergency override) - harus menembus suppression.
+    emergency = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.95), scored_at)
+    assert len(emergency) == 1, "lonjakan skor tajam harus membuka alert BARU walau masih disupresi"
+    assert emergency[0] != opened_ids[0], "alert baru harus baris baru, bukan membuka lagi alert lama"
+
+
+@pytest.fixture(scope="module")
+def closed_cycle():
+    """Cycle historis yang SUNGGUHAN sudah tertutup di data operasional
+    (FAILURE/RETURNED/DISMANTLED), pada item yang SAAT INI juga punya cycle
+    aktif (dipasang ulang) - dipakai membuktikan jalur auto-resolve
+    (docs/DECISIONS.md §27) tanpa mengarang data operasional. Item tanpa
+    cycle aktif sama sekali sengaja dikecualikan karena
+    `resolve_with_intervention()` butuh `ensure_active_cycle()` berhasil
+    (lihat test cycle-mismatch)."""
+    from partrisk.core import data_reader
+
+    all_cycles = data_reader.get_cycles()
+    closed = all_cycles.loc[all_cycles["cycle_end_reason"] != "RIGHT_CENSORED_AT_DATA_END"]
+    active_items = set(
+        all_cycles.loc[
+            all_cycles["cycle_end_reason"] == "RIGHT_CENSORED_AT_DATA_END", "item_identifier_clean"
+        ]
+    )
+    candidate = closed.loc[closed["item_identifier_clean"].isin(active_items)]
+    if candidate.empty:
+        pytest.skip("tidak ada item dengan cycle tertutup DAN cycle aktif untuk diuji")
+    row = candidate.iloc[0]
+    return {
+        "item_id": row["item_identifier_clean"],
+        "cycle_id": row["installation_cycle_id"],
+        "end_reason": row["cycle_end_reason"],
+    }
+
+
+@pytest.fixture
+def cleanup_alert_ids():
+    created: list[int] = []
+    yield created
+    if not created:
+        return
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM predictive.alert WHERE alert_id = ANY(%s)", (created,))
+        conn.commit()
+
+
+def _insert_open_alert(item_id: str, cycle_id: str) -> int:
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO predictive.alert
+                    (item_id, cycle_id, intervention_seq, opened_at, opened_score, status)
+                VALUES (%s, %s, 0, now(), 0.5, 'OPEN')
+                RETURNING alert_id
+                """,
+                (item_id, cycle_id),
+            )
+            alert_id = cur.fetchone()[0]
+        conn.commit()
+    return alert_id
+
+
+@needs_database
+def test_auto_resolve_closed_cycles_menutup_alert_pada_cycle_yang_sudah_berakhir(
+    closed_cycle, cleanup_item_lifecycle, cleanup_alert_ids
+):
+    cleanup_item_lifecycle.append(closed_cycle["item_id"])
+    cycle_store.sync_item_cycles(closed_cycle["item_id"])
+    alert_id = _insert_open_alert(closed_cycle["item_id"], closed_cycle["cycle_id"])
+    cleanup_alert_ids.append(alert_id)
+
+    resolved_ids = alert_engine.auto_resolve_closed_cycles([closed_cycle["item_id"]])
+
+    assert alert_id in resolved_ids
+    alert = alert_engine.get_alert(alert_id)
+    assert alert["status"] == "RESOLVED"
+    assert alert["resolution_reason"] == f"OPERATIONAL_CYCLE_CLOSED:{closed_cycle['end_reason']}"
+
+
+@needs_database
+def test_resolve_with_intervention_auto_resolve_alert_pada_cycle_lama(
+    closed_cycle, cleanup_item_lifecycle, cleanup_alert_ids
+):
+    """Kalau intervention diajukan untuk alert yang cycle-nya TERNYATA sudah
+    tertutup di data operasional (item sudah pindah cycle), alert lama itu
+    auto-resolved dulu (bukan AlertCycleMismatch mentah) - lihat WHY di
+    resolve_with_intervention()."""
+    cleanup_item_lifecycle.append(closed_cycle["item_id"])
+    cycle_store.sync_item_cycles(closed_cycle["item_id"])
+    alert_id = _insert_open_alert(closed_cycle["item_id"], closed_cycle["cycle_id"])
+    cleanup_alert_ids.append(alert_id)
+
+    with pytest.raises(alert_engine.AlertNotOpen):
+        alert_engine.resolve_with_intervention(alert_id, pd.Timestamp.now(tz="UTC"))
+
+    alert = alert_engine.get_alert(alert_id)
+    assert alert["status"] == "RESOLVED"
+    assert alert["resolution_reason"] == f"OPERATIONAL_CYCLE_CLOSED:{closed_cycle['end_reason']}"
+
+
+@needs_database
+def test_resolve_item_by_host_serial_code(scorable_item):
+    """host_serial_code (format MODEL-PAIRINGCODE-REPAIRSEQ, docs §28) harus
+    diresolve balik ke item_id internal yang sama dengan scorable_item."""
+    with data_reader.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT host_serial_code FROM journal.t_item_journey "
+                "WHERE UPPER(TRIM(item_pairing_code)) = %s AND host_serial_code IS NOT NULL "
+                "ORDER BY created_on DESC LIMIT 1",
+                (scorable_item,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        pytest.skip(f"item {scorable_item} tidak punya host_serial_code di journal untuk diuji")
+
+    resolved = data_reader.resolve_item_by_host_serial_code(row[0])
+    assert resolved == scorable_item
+
+
+@needs_database
+def test_resolve_item_by_host_serial_code_tidak_ditemukan():
+    assert data_reader.resolve_item_by_host_serial_code("TIDAK-ADA-SERIAL-CODE-SEPERTI-INI") is None
+
+
+@needs_database
+@needs_models
+def test_resolve_by_item_dengan_alert_open_meresolve_alert(scorable_item, cleanup_alert_lifecycle):
+    cleanup_alert_lifecycle.append(scorable_item)
+    scored_at = pd.Timestamp.now(tz="UTC")
+    opened_ids = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
+    assert len(opened_ids) == 1
+
+    result = alert_engine.resolve_by_item(scorable_item, pd.Timestamp.now(tz="UTC"))
+
+    assert result["alert"] is not None
+    assert result["alert"]["alert_id"] == opened_ids[0]
+    assert result["alert"]["status"] == "RESOLVED"
+    assert result["intervention"]["alert_id"] == opened_ids[0]
+
+
+@needs_database
+def test_resolve_by_item_tanpa_alert_open_tetap_mencatat_intervention(
+    scorable_item, cleanup_item_lifecycle
+):
+    """docs/DECISIONS.md §25/§28: satu POST tetap berarti ada perbaikan
+    walau item ini tidak sedang punya alert OPEN - intervention tetap
+    dicatat, cuma tidak ada alert yang ikut ditutup."""
+    cleanup_item_lifecycle.append(scorable_item)
+
+    result = alert_engine.resolve_by_item(scorable_item, pd.Timestamp.now(tz="UTC"))
+
+    assert result["alert"] is None
+    assert result["intervention"]["item_id"] == scorable_item
+    assert result["intervention"]["alert_id"] is None

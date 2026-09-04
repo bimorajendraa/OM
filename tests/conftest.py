@@ -70,15 +70,3 @@ def batch():
 @pytest.fixture(scope="session")
 def scorable_item(batch) -> str:
     return str(batch.frame["item_id"].iloc[0])
-
-
-@pytest.fixture(scope="session")
-def not_scorable_item(batch) -> str:
-    from partrisk.core import data_reader
-
-    active = set(batch.frame["item_id"])
-    events = data_reader.get_events()
-    for item in events["item_identifier_clean"].dropna().unique():
-        if item not in active:
-            return str(item)
-    pytest.skip("semua PART di database sedang aktif")

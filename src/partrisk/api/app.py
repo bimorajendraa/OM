@@ -11,32 +11,21 @@ from contextlib import asynccontextmanager
 import pandas as pd
 import psycopg_pool
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from partrisk.core import config
 from partrisk.core import data_reader
+from partrisk.predictive import alerts as alert_engine
+from partrisk.predictive.cycles import ItemNotInstalled
 from partrisk.serving import single as serving
 from partrisk.serving import batch as serving_batch
-from partrisk.serving.single import (
-    AlertNotFound,
-    DataSourceUnavailable,
-    ModelUnavailable,
-    PartNotFound,
-    PartNotScorable,
-)
+from partrisk.serving.single import ModelUnavailable, PartNotFound
 from partrisk.api.schemas import (
-    AssessmentResponse,
-    FailureResponse,
-    FiltersResponse,
     HealthResponse,
-    HistoryResponse,
-    OverviewResponse,
-    RecommendationListResponse,
-    ResolveAlertResponse,
-    TerminalListResponse,
-    TerminalPartListResponse,
+    InterventionRequest,
+    InterventionResponse,
 )
 
 
@@ -74,16 +63,11 @@ WARMUP_BATCH_ON_STARTUP = os.getenv("WARMUP_BATCH_ON_STARTUP", "false").lower() 
     "1", "true", "yes"
 )
 
-MAX_RECOMMENDATION_LIMIT = config._int("MAX_RECOMMENDATION_LIMIT", 500)
-
 CORS_ALLOW_ORIGINS = [
     origin.strip()
     for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",")
     if origin.strip()
 ]
-DEFAULT_RECOMMENDATION_LIMIT = config._int("DEFAULT_RECOMMENDATION_LIMIT", 50)
-
-API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
 
 API_KEY = os.getenv("API_KEY", "").strip() or None
@@ -194,225 +178,54 @@ def health(check_database: bool = False) -> dict:
     }
 
 
-model_info_router = APIRouter(prefix="/api/v1", tags=["model"])
+interventions_router = APIRouter(prefix="/api/v1", tags=["interventions"])
 
 
-@model_info_router.get("/model")
-def model_info() -> dict:
-    return serving.describe()
-
-
-prediction_router = APIRouter(prefix="/api/v1/parts", tags=["parts"])
-
-_ITEM_ID = Path(
-    description="ID PART, mis. 011201100101164. Fitur ML dibangun otomatis.",
-    min_length=1,
-    max_length=100,
-)
-
-
-def _not_scorable(error: PartNotScorable) -> dict:
+def _stringify_datetimes(row: dict) -> dict:
     return {
-        "item_id": error.item_id,
-        "status": "NOT_SCORABLE",
-        "reason": error.reason,
+        key: (value.isoformat() if hasattr(value, "isoformat") else value)
+        for key, value in row.items()
     }
 
 
-@prediction_router.get("/{item_id}/failure", response_model=FailureResponse)
-def failure(item_id: str = _ITEM_ID) -> dict:
-    """Peluang PART rusak dalam 30/60/90/120 hari ke depan.
+@interventions_router.post("/interventions", response_model=InterventionResponse)
+def record_intervention(payload: InterventionRequest) -> dict:
+    """Catat satu perbaikan terhadap satu PART - jalur MANUAL untuk tindakan
+    yang TIDAK PERNAH masuk data operasional (mis. sekadar mengencangkan
+    baut). Kalau perbaikannya berupa work order corrective/preventive yang
+    berakhir dismantle, itu sudah tercatat di data operasional dan alert
+    mati SENDIRI (jalur otomatis, lihat
+    predictive/alerts.py::auto_resolve_closed_cycles()) - endpoint ini
+    tidak perlu dipanggil untuk kasus itu.
 
-    Ini PELUANG, bukan perkiraan tanggal kerusakan.
+    Diidentifikasi lewat `host_serial_code` (label fisik PART), BUKAN
+    alert_id internal - aplikasi eksternal tidak pernah tahu alert_id (tidak
+    ada GET /alerts, lihat docs/DECISIONS.md §26/§28). Kalau PART ini SEDANG
+    punya alert OPEN, alert itu ikut di-RESOLVE; kalau tidak, intervention
+    tetap dicatat (satu POST SUDAH BERARTI satu perbaikan terjadi) tanpa
+    ada alert yang ditutup. `performed_at` diambil dari waktu server
+    menerima request, TIDAK ada idempotency key eksternal - retry akan
+    membuat baris intervention baru (docs/DECISIONS.md §28, trade-off
+    disetujui eksplisit demi kesederhanaan body request).
     """
-    try:
-        prediction = serving.predict_failure(item_id)
-    except PartNotScorable as error:
-        return _not_scorable(error)
-    return {"item_id": prediction["item_id"], "status": "SCORED", "failure": prediction}
-
-
-@prediction_router.get("/{item_id}/history", response_model=HistoryResponse)
-def history(item_id: str = _ITEM_ID) -> dict:
-    return serving.item_history(item_id)
-
-
-@prediction_router.post("/{item_id}/resolve-alert", response_model=ResolveAlertResponse)
-def resolve_alert(item_id: str = _ITEM_ID) -> dict:
-    return serving.resolve_alert(item_id)
-
-
-@prediction_router.get("/{item_id}/assessment", response_model=AssessmentResponse)
-def assessment(
-    item_id: str = _ITEM_ID,
-    explain: bool = Query(
-        True,
-        description=(
-            "Sertakan faktor risiko. Perlu satu putaran pembacaan riwayat "
-            "tambahan, matikan kalau hanya butuh angkanya."
-        ),
-    ),
-) -> dict:
-    """Risiko kerusakan + rekomendasi tindakan."""
-    try:
-        return serving.get_part_assessment(item_id, include_explanation=explain)
-    except PartNotScorable as error:
-        return _not_scorable(error)
-
-
-recommendations_router = APIRouter(prefix="/api/v1", tags=["recommendations"])
-
-_INTERNAL_COLUMNS = ["tier_score", "in_official_queue"]
-
-
-def _rows(frame: pd.DataFrame) -> list[dict]:
-    clean = frame.drop(columns=_INTERNAL_COLUMNS, errors="ignore")
-    return [
-        {key: (None if pd.isna(value) else value) for key, value in record.items()}
-        for record in clean.to_dict(orient="records")
-    ]
-
-
-@recommendations_router.get("/recommendations", response_model=RecommendationListResponse)
-def recommendations(
-    risk: str | None = Query(None, description="Saring kelompok risiko kerusakan: LOW/MEDIUM/HIGH"),
-    priority: str | None = Query(None, description="Saring prioritas: LOW/MEDIUM/HIGH"),
-    item_type: str | None = Query(None, description="Saring jenis PART, mis. MOTOR"),
-    client: str | None = Query(None, description="Saring client"),
-    location: str | None = Query(None, description="Saring lokasi terakhir tercatat"),
-    terminal_id: str | None = Query(
-        None, description="Saring PART milik satu Terminal (terminal_id dari /api/v1/terminals)"
-    ),
-    search: str | None = Query(
-        None, description="Cari sebagian ID PART, mis. 0112011 (tidak harus lengkap)"
-    ),
-    official_queue_only: bool = Query(
-        True,
-        description=(
-            "True (default): antrian RESMI - hanya PART yang lolos gerbang "
-            "presisi (docs/DECISIONS.md §11), ukurannya dinamis dan bisa "
-            "kosong kalau memang tidak ada yang cukup meyakinkan. False: "
-            "seluruh armada terurut skor, untuk eksplorasi manual."
-        ),
-    ),
-    limit: int = Query(DEFAULT_RECOMMENDATION_LIMIT, ge=1),
-    offset: int = Query(0, ge=0),
-) -> dict:
-    """PART yang paling perlu diperhatikan, terurut dari yang paling berisiko."""
-    limit = min(limit, MAX_RECOMMENDATION_LIMIT)
-    scores = serving_batch.score_active_parts()
-    selected = serving_batch.filter_scores(
-        scores.frame,
-        risk=risk,
-        priority=priority,
-        item_type=item_type,
-        client=client,
-        location=location,
-        terminal_id=terminal_id,
-        search=search,
-        official_queue_only=official_queue_only,
-    )
-    page = selected.iloc[offset : offset + limit]
+    item_id = data_reader.resolve_item_by_host_serial_code(payload.host_serial_code)
+    if item_id is None:
+        raise PartNotFound(
+            payload.host_serial_code,
+            message=f"PART dengan serial code '{payload.host_serial_code}' tidak ditemukan.",
+        )
+    result = alert_engine.resolve_by_item(item_id, pd.Timestamp.now(tz="UTC"))
     return {
-        "total": int(len(selected)),
-        "returned": int(len(page)),
-        "offset": offset,
-        "scored_at": scores.scored_at,
-        "items": _rows(page),
-    }
-
-
-@recommendations_router.get("/overview", response_model=OverviewResponse)
-def overview(
-    top: int = Query(10, ge=1, le=100, description="Berapa PART teratas yang ikut dikirim"),
-) -> dict:
-    """Angka ringkas seluruh armada + daftar teratas, untuk halaman overview."""
-    scores = serving_batch.score_active_parts()
-    return {
-        "summary": serving_batch.summary(scores.frame),
-        "scored_at": scores.scored_at,
-        "top_priority": _rows(scores.frame.head(top)),
-    }
-
-
-@recommendations_router.get("/filters", response_model=FiltersResponse)
-def filters() -> dict:
-    """Nilai filter yang benar-benar ada di data, untuk dropdown dashboard."""
-    scores = serving_batch.score_active_parts()
-    return serving_batch.facets(scores.frame)
-
-
-@recommendations_router.get("/terminals", response_model=TerminalListResponse)
-def terminals() -> dict:
-    scores = serving_batch.score_active_parts()
-    overview_counts = serving_batch.terminal_overview(scores.frame)
-    summary = serving_batch.terminal_summary(scores.frame)
-    rows = summary.reset_index().to_dict(orient="records")
-    return {
-        "terminals": [
-            {key: (None if pd.isna(value) else value) for key, value in row.items()}
-            for row in rows
-        ],
-        "terminals_total": overview_counts["terminals"],
-        "parts_with_terminal": overview_counts["parts_with_terminal"],
-        "parts_without_terminal": overview_counts["parts_without_terminal"],
-        "scored_at": scores.scored_at,
-    }
-
-
-@recommendations_router.get(
-    "/terminals/{terminal_id}/parts", response_model=TerminalPartListResponse
-)
-def terminal_parts(terminal_id: str) -> dict:
-    scores = serving_batch.score_active_parts()
-    summary = serving_batch.terminal_part_summary(scores.frame, terminal_id)
-    rows = summary.reset_index().to_dict(orient="records")
-    return {
-        "terminal_id": terminal_id,
-        "parts": [
-            {key: (None if pd.isna(value) else value) for key, value in row.items()}
-            for row in rows
-        ],
-        "scored_at": scores.scored_at,
-    }
-
-
-@recommendations_router.get(
-    "/terminals/{terminal_id}/parts/{part_type}", response_model=RecommendationListResponse
-)
-def terminal_part_items(
-    terminal_id: str,
-    part_type: str,
-    limit: int = Query(DEFAULT_RECOMMENDATION_LIMIT, ge=1),
-    offset: int = Query(0, ge=0),
-) -> dict:
-    limit = min(limit, MAX_RECOMMENDATION_LIMIT)
-    scores = serving_batch.score_active_parts()
-    selected = serving_batch.filter_scores(
-        scores.frame,
-        terminal_id=terminal_id,
-        part_type=part_type,
-        official_queue_only=False,
-    )
-    page = selected.iloc[offset : offset + limit]
-    return {
-        "total": int(len(selected)),
-        "returned": int(len(page)),
-        "offset": offset,
-        "scored_at": scores.scored_at,
-        "items": _rows(page),
+        "intervention": _stringify_datetimes(result["intervention"]),
+        "alert": _stringify_datetimes(result["alert"]) if result["alert"] else None,
     }
 
 
 DESCRIPTION = """
-API risiko kerusakan untuk PART.
-
-**Yang perlu diketahui saat membaca angkanya**
-
-- `failure_probability_Nd` adalah PELUANG PART rusak dalam N hari ke depan.
-  Model tidak memperkirakan tanggal kerusakan.
-- Kelompok risiko (LOW/MEDIUM/HIGH) memakai ambang yang ditetapkan saat
-  training dari kapasitas kerja tim, bukan angka bulat yang dikarang.
+API predictive maintenance - satu-satunya endpoint publik yang dibutuhkan
+aplikasi eksternal adalah `POST /api/v1/interventions` (docs/DECISIONS.md
+§28/§29). Tidak ada endpoint GET untuk data prediksi/rekomendasi/terminal -
+aplikasi eksternal baca schema `predictive` langsung dari database.
 """
 
 
@@ -453,9 +266,7 @@ if CORS_ALLOW_ORIGINS:
     )
 
 app.include_router(health_router)
-app.include_router(model_info_router, dependencies=[Depends(require_api_key)])
-app.include_router(prediction_router, dependencies=[Depends(require_api_key)])
-app.include_router(recommendations_router, dependencies=[Depends(require_api_key)])
+app.include_router(interventions_router, dependencies=[Depends(require_api_key)])
 
 
 @app.exception_handler(PartNotFound)
@@ -470,51 +281,37 @@ async def handle_part_not_found(request: Request, error: PartNotFound) -> JSONRe
     )
 
 
-@app.exception_handler(AlertNotFound)
-async def handle_alert_not_found(request: Request, error: AlertNotFound) -> JSONResponse:
+@app.exception_handler(alert_engine.AlertNotFound)
+async def handle_alert_not_found(request: Request, error: alert_engine.AlertNotFound) -> JSONResponse:
     return JSONResponse(
         status_code=404,
-        content={
-            "status": "NOT_FOUND",
-            "item_id": error.item_id,
-            "message": error.message,
-        },
+        content={"status": "NOT_FOUND", "message": str(error)},
     )
 
 
-@app.exception_handler(PartNotScorable)
-async def handle_not_scorable(request: Request, error: PartNotScorable) -> JSONResponse:
+@app.exception_handler(alert_engine.AlertNotOpen)
+async def handle_alert_not_open(request: Request, error: alert_engine.AlertNotOpen) -> JSONResponse:
     return JSONResponse(
-        status_code=200,
-        content={
-            "status": "NOT_SCORABLE",
-            "item_id": error.item_id,
-            "reason": error.reason,
-        },
+        status_code=409,
+        content={"status": "ALERT_NOT_OPEN", "message": str(error)},
     )
 
 
-@app.exception_handler(ModelUnavailable)
-async def handle_model_unavailable(request: Request, error: ModelUnavailable) -> JSONResponse:
-    logger.error("Model tidak tersedia: %s", error)
+@app.exception_handler(alert_engine.AlertCycleMismatch)
+async def handle_alert_cycle_mismatch(
+    request: Request, error: alert_engine.AlertCycleMismatch
+) -> JSONResponse:
     return JSONResponse(
-        status_code=503,
-        content={
-            "status": "MODEL_UNAVAILABLE",
-            "message": "Model production belum tersedia di server.",
-        },
+        status_code=409,
+        content={"status": "ALERT_CYCLE_MISMATCH", "message": str(error)},
     )
 
 
-@app.exception_handler(DataSourceUnavailable)
-async def handle_data_source(request: Request, error: DataSourceUnavailable) -> JSONResponse:
-    logger.exception("Database tidak bisa dibaca")
+@app.exception_handler(ItemNotInstalled)
+async def handle_item_not_installed(request: Request, error: ItemNotInstalled) -> JSONResponse:
     return JSONResponse(
-        status_code=503,
-        content={
-            "status": "DATA_SOURCE_UNAVAILABLE",
-            "message": "Sumber data sedang tidak bisa dibaca. Coba lagi nanti.",
-        },
+        status_code=404,
+        content={"status": "NOT_FOUND", "message": str(error)},
     )
 
 

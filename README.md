@@ -38,8 +38,8 @@ cp .env.example .env                      # lalu isi kredensial database
 ```
 
 `requirements.txt` hanya kebutuhan training; `requirements-serving.txt`
-menambah FastAPI, Streamlit, dan test. `requirements.lock.txt` adalah
-snapshot versi PERSIS untuk deployment yang butuh reproduksi environment.
+menambah FastAPI dan test. `requirements.lock.txt` adalah snapshot versi
+PERSIS untuk deployment yang butuh reproduksi environment.
 
 ### 2. Training / retraining
 
@@ -60,25 +60,19 @@ uvicorn partrisk.api.app:app --reload
 
 Dokumentasi interaktif: <http://127.0.0.1:8000/docs>
 
-### 4. Menjalankan dashboard
+Tidak ada endpoint GET untuk data prediksi/rekomendasi - satu-satunya
+endpoint publik adalah `POST /api/v1/interventions` (docs/DECISIONS.md
+§28/§29). Aplikasi eksternal yang butuh baca prediksi/alert langsung baca
+schema `predictive` dari database.
 
-API harus sudah jalan lebih dulu.
-
-```bash
-streamlit run dashboard/app.py
-```
-
-<http://localhost:8501>
-
-### 5. Docker
+### 4. Docker
 
 ```bash
 docker compose up --build
 ```
 
-API di `localhost:8000`, dashboard di `localhost:8501`. Satu image dipakai
-dua kali dengan perintah start berbeda. Database **tidak** ikut di-container -
-yang dipakai adalah PostgreSQL yang sudah ada, kredensial dari `.env` di host.
+API di `localhost:8000`. Database **tidak** ikut di-container - yang
+dipakai adalah PostgreSQL yang sudah ada, kredensial dari `.env` di host.
 
 ### CLI manual lainnya
 
@@ -109,13 +103,13 @@ dijalankan rutin.
 | `GET /api/v1/parts/{item_id}/failure` | peluang rusak 30/60/90/120 hari |
 | `GET /api/v1/parts/{item_id}/assessment` | peluang rusak + rekomendasi + faktor risiko |
 | `GET /api/v1/parts/{item_id}/history` | tanggal kerusakan dan lokasi yang pernah tercatat |
-| `POST /api/v1/parts/{item_id}/resolve-alert` | tutup alert lifecycle aktif untuk PART ini (`serving/alerts.py`) |
 | `GET /api/v1/recommendations` | antrian RESMI: hanya PART yang lolos gerbang presisi (`official_queue_only=true`, default) - ukuran dinamis, boleh kosong. `official_queue_only=false` = mode eksplorasi (seluruh armada, terurut `tier_score`, tidak disaring `risk_level`) |
 | `GET /api/v1/overview` | angka ringkas armada + daftar teratas |
 | `GET /api/v1/filters` | nilai filter yang benar-benar ada di data |
 | `GET /api/v1/terminals` | ringkasan per Terminal fisik (jumlah PART, sebaran risiko, PART paling berisiko) |
 | `GET /api/v1/terminals/{terminal_id}/parts` | level 2 hierarki: ringkasan per Part Type (`item_model_code`) dalam satu Terminal |
 | `GET /api/v1/terminals/{terminal_id}/parts/{part_type}` | level 3 hierarki: daftar Item untuk satu Part Type dalam satu Terminal |
+| `POST /api/v1/alerts/{alert_id}/interventions` | catat satu perbaikan untuk satu alert - resolve alert lewat intervention tercatat, transaksional + idempotent (`predictive/alerts.py`, lihat docs/DATABASE.md) |
 
 Filter `/api/v1/recommendations`: `search`, `risk`, `priority`, `item_type`,
 `client`, `location`, `terminal_id`, `limit`, `offset`.
@@ -169,23 +163,22 @@ src/partrisk/
 │       ├── train.py            latih model + util versi/promosi
 │       └── gate.py             gerbang presisi row-level & lifecycle (first-alert, E-49)
 ├── serving/
-│   ├── single.py               prediksi satu PART, rekomendasi, penjelasan, riwayat
-│   ├── batch.py                prediksi SELURUH PART aktif sekaligus (vectorized)
-│   └── alerts.py                alert lifecycle (dedup, resolve-alert), tanpa persistence
+│   ├── single.py               exception bersama + metadata model (versions/warmup) - tidak ada lagi prediksi single-item lewat API
+│   └── batch.py                prediksi SELURUH PART aktif sekaligus (vectorized), dipakai scoring bulanan + CLI predict
 ├── predictive/
 │   ├── db.py                   koneksi tulis schema `predictive` + migration runner
 │   ├── scoring.py               model_run + item_prediction (append-only) - `score-and-persist`
 │   ├── cycles.py                 sinkron item_cycle dari data operasional (on-demand per item)
-│   └── interventions.py          catat tindakan teknisi - intervention_seq DALAM cycle aktif
+│   ├── interventions.py          catat tindakan teknisi - intervention_seq DALAM cycle aktif
+│   └── alerts.py                 alert persisten: buka (scheduled scoring), baca (live), resolve (intervention)
 ├── api/
-│   ├── app.py                  FastAPI: app, routes, db pool, settings, logging
+│   ├── app.py                  FastAPI: /health + POST /api/v1/interventions saja (docs/DECISIONS.md §29)
 │   └── schemas.py               bentuk request/response API
 └── cli.py                      pipeline/predict/golden-batch/baseline/backtest/dst - lihat `python -m partrisk.cli -h`
 
 migrations/predictive/   SQL migrasi schema predictive, terurut nomor - lihat docs/DATABASE.md
-dashboard/       Streamlit (app.py + pages/); hanya bicara ke API lewat HTTP, tidak pernah ke DB
 tests/           conftest.py + test_pipeline.py + test_lifecycle.py + test_gate.py +
-                 test_serving.py + test_api.py + test_predictive.py
+                 test_batch.py + test_api.py + test_predictive.py
 docs/            METHODOLOGY.md (indeks per simbol) · CODE_NOTES.md (catatan
                  implementasi dari kode) · EXPERIMENTS.md (log eksperimen
                  kronologis, 80+) · DECISIONS.md (ADR) · DATABASE.md (schema predictive)
@@ -202,7 +195,7 @@ production.
 - **`docs/METHODOLOGY.md`** - keputusan teknis per simbol/konstanta
   (`grep NAMA_KONSTANTA docs/METHODOLOGY.md`).
 - **`docs/CODE_NOTES.md`** - seluruh komentar implementasi yang sebelumnya
-  berada di `src/`, `dashboard/`, dan `tests/`, dikelompokkan menurut file,
+  berada di `src/` dan `tests/`, dikelompokkan menurut file,
   scope fungsi/class, dan lokasi historisnya.
 - **`docs/DECISIONS.md`** - ADR: aturan promosi model, arah dependensi
   `api -> serving`, prosedur rollback lewat `CURRENT`, prasyarat deployment
@@ -217,8 +210,6 @@ production.
   `default_transaction_read_only=on`. Hanya `predictive/db.py` yang menulis,
   dan hanya ke schema `predictive` - lihat `docs/DATABASE.md`.
 - `serving*` tidak pernah meng-import `api*` - arah hanya `api -> serving`.
-- `dashboard/` tidak meng-import `partrisk`, tidak menyentuh DB/model - semua
-  angka lewat HTTP.
 - Data hilang tidak pernah diisi nilai karangan - `NOT_SCORABLE` ≠ `LOW`.
 - Nol kredensial di kode/image; client tidak pernah menerima SQL/DSN/stack
   trace.

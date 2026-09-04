@@ -14,10 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 _CONFIG = ConfigDict(protected_namespaces=(), extra="allow")
 
-RiskLevel = Literal["LOW", "MEDIUM", "HIGH"]
-Priority = Literal["LOW", "MEDIUM", "HIGH"]
-ScoringStatus = Literal["SCORED", "NOT_SCORABLE"]
-
 
 class HealthResponse(BaseModel):
     model_config = _CONFIG
@@ -30,219 +26,57 @@ class HealthResponse(BaseModel):
     batch_cache: dict
 
 
-class FailurePrediction(BaseModel):
-    """Keluaran predict.predict() apa adanya.
-
-    Angkanya adalah PELUANG kerusakan dalam N hari ke depan. Model tidak
-    memperkirakan tanggal kerusakan pasti.
-    """
+class InterventionRequest(BaseModel):
+    """Satu perbaikan yang dilaporkan aplikasi eksternal/teknisi terhadap
+    satu PART - lihat docs/DECISIONS.md §28. Diidentifikasi lewat
+    `host_serial_code` (label fisik PART, BUKAN alert_id internal - aplikasi
+    eksternal tidak pernah tahu alert_id). Tidak ada field lain - satu POST
+    di sini SUDAH BERARTI satu perbaikan terjadi, waktunya diambil dari saat
+    server menerima request."""
 
     model_config = _CONFIG
 
+    host_serial_code: str = Field(
+        description="Label fisik PART (format MODEL-PAIRINGCODE-REPAIRSEQ)."
+    )
+
+
+class InterventionResult(BaseModel):
+    model_config = _CONFIG
+
+    intervention_id: int
     item_id: str
-    failure_probability_30d: float = Field(ge=0.0, le=1.0)
-    failure_probability_60d: float = Field(ge=0.0, le=1.0)
-    failure_probability_90d: float = Field(ge=0.0, le=1.0)
-    failure_probability_120d: float = Field(ge=0.0, le=1.0)
-    risk_level: RiskLevel
-    model_version: str
-    as_of: str
-    installed_on: str
+    cycle_id: str
+    intervention_seq: int
+    alert_id: int | None
+    performed_at: str
+    created_at: str
 
 
-class Recommendation(BaseModel):
+class AlertResult(BaseModel):
     model_config = _CONFIG
 
-    priority: Priority
-    action: str
-    message: str
-    based_on: dict
-
-
-class RiskFactor(BaseModel):
-    model_config = _CONFIG
-
-    code: str
-    direction: Literal["RISK_FACTOR", "MITIGATING", "CONTEXT"]
-    label: str
-    value: float | int | None = None
-
-
-class Explanation(BaseModel):
-    model_config = _CONFIG
-
-    disclaimer: str
-    factors: list[RiskFactor]
-    notes: list[str] = []
-    caveats: list[str] = []
-
-
-class FailureResponse(BaseModel):
-    model_config = _CONFIG
-
+    alert_id: int
+    terminal_id: str | None
+    part_type: str | None
     item_id: str
-    status: ScoringStatus
-    reason: str | None = None
-    failure: FailurePrediction | None = None
+    cycle_id: str
+    intervention_seq: int
+    status: Literal["OPEN", "ACKNOWLEDGED", "RESOLVED", "SUPPRESSED"]
+    opened_at: str
+    opened_score: float
+    resolved_at: str | None
+    resolution_reason: str | None
+    suppression_until: str | None
 
 
-class AssessmentResponse(BaseModel):
+class InterventionResponse(BaseModel):
     model_config = _CONFIG
 
-    item_id: str
-    status: ScoringStatus
-    reason: str | None = None
-    as_of: str | None = None
-    failure: FailurePrediction | None = None
-    recommendation: Recommendation | None = None
-    explanation: Explanation | None = None
-    model_version: dict[str, str | None] | None = None
-
-
-class PriorityItem(BaseModel):
-    """Satu baris daftar prioritas hasil batch scoring."""
-
-    model_config = _CONFIG
-
-    rank: int
-    item_id: str
-    item_type: str | None = None
-    item_model_code: str | None = None
-    client: str | None = None
-    location: str | None = None
-    terminal_id: str | None = None
-    terminal_label: str | None = None
-    terminal_model_name: str | None = None
-    installation_age_days: float | None = None
-    failure_probability_30d: float
-    failure_probability_60d: float
-    failure_probability_90d: float
-    failure_probability_120d: float
-    failure_risk_level: RiskLevel
-    priority: Priority
-    recommended_action: str
-    recommendation_message: str
-    gate_flagged: bool
-    alert_status: Literal["OPEN"] | None = None
-    alert_opened_at: str | None = None
-    alert_score_at_open: float | None = None
-    alert_threshold_at_open: float | None = None
-    alert_model_version: str | None = None
-
-
-class ScoredAt(BaseModel):
-    """Kapan daftar ini dihitung dan sampai kapan datanya."""
-
-    model_config = _CONFIG
-
-    data_through: str
-    computed_seconds_ago: int
-    model_version: dict[str, str]
-
-
-class RecommendationListResponse(BaseModel):
-    model_config = _CONFIG
-
-    total: int
-    returned: int
-    offset: int
-    scored_at: ScoredAt
-    items: list[PriorityItem]
-
-
-class OverviewResponse(BaseModel):
-    model_config = _CONFIG
-
-    summary: dict
-    scored_at: ScoredAt
-    top_priority: list[PriorityItem]
-
-
-class FiltersResponse(BaseModel):
-    model_config = _CONFIG
-
-    risk_levels: list[str]
-    priorities: list[str]
-    item_types: list[str]
-    clients: list[str]
-    locations: list[str]
-
-
-class FailureHistoryItem(BaseModel):
-    model_config = _CONFIG
-
-    date: str
-    location: str | None = None
-    status: str
-    wo_type: str | None = None
-
-
-class LocationHistoryItem(BaseModel):
-    model_config = _CONFIG
-
-    location: str
-    first_seen: str
-    last_seen: str
-    events: int
-
-
-class HistoryResponse(BaseModel):
-    model_config = _CONFIG
-
-    item_id: str
-    failures: list[FailureHistoryItem]
-    locations: list[LocationHistoryItem]
-
-
-class TerminalSummaryItem(BaseModel):
-    model_config = _CONFIG
-
-    terminal_id: str
-    terminal_label: str | None = None
-    terminal_model_name: str | None = None
-    location: str | None = None
-    active_parts: int
-    high_risk_parts: int
-    medium_risk_parts: int
-    low_risk_parts: int
-    top_risk_item_id: str | None = None
-    top_risk_probability: float | None = None
-
-
-class TerminalListResponse(BaseModel):
-    model_config = _CONFIG
-
-    terminals: list[TerminalSummaryItem]
-    terminals_total: int
-    parts_with_terminal: int
-    parts_without_terminal: int
-    scored_at: ScoredAt
-
-
-class TerminalPartSummaryItem(BaseModel):
-    model_config = _CONFIG
-
-    part_type: str
-    installed_count: int
-    high_risk_parts: int
-    medium_risk_parts: int
-    low_risk_parts: int
-    open_alert_count: int
-
-
-class TerminalPartListResponse(BaseModel):
-    model_config = _CONFIG
-
-    terminal_id: str
-    parts: list[TerminalPartSummaryItem]
-    scored_at: ScoredAt
-
-
-class ResolveAlertResponse(BaseModel):
-    model_config = _CONFIG
-
-    item_id: str
-    status: Literal["RESOLVED"]
+    intervention: InterventionResult
+    alert: AlertResult | None = Field(
+        description="Alert yang ikut di-RESOLVE, kalau item ini sedang punya alert OPEN. null kalau tidak ada."
+    )
 
 
 class ErrorResponse(BaseModel):

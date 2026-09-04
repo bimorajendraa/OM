@@ -29,19 +29,6 @@ CREATE TABLE IF NOT EXISTS predictive.intervention (
 
     alert_id BIGINT,
 
-    -- Sengaja TIDAK ada kolom klasifikasi jenis (type) - satu baris di sini
-    -- SUDAH BERARTI satu perbaikan terjadi, apa pun bentuknya (keputusan
-    -- user, docs/DECISIONS.md §25 update). outcome/action_code/remark tetap
-    -- ada sebagai detail opsional bebas isi, bukan kategori terkontrol.
-    outcome TEXT,
-    action_code TEXT,
-    remark TEXT,
-
-    external_system TEXT,
-    external_work_order_id TEXT,
-    external_inspection_id TEXT,
-    external_event_id TEXT,
-
     performed_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -50,7 +37,3 @@ CREATE TABLE IF NOT EXISTS predictive.intervention (
 
 CREATE INDEX IF NOT EXISTS ix_intervention_item ON predictive.intervention (item_id);
 CREATE INDEX IF NOT EXISTS ix_intervention_cycle ON predictive.intervention (cycle_id);
-
-CREATE UNIQUE INDEX IF NOT EXISTS ux_intervention_external_event
-    ON predictive.intervention (external_system, external_event_id)
-    WHERE external_system IS NOT NULL AND external_event_id IS NOT NULL;
