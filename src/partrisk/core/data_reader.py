@@ -585,6 +585,7 @@ cycle_base AS (
     SELECT
         i.item_identifier_clean || ':' || i.installation_sequence::text
             AS installation_cycle_id,
+        i.host_serial_code_clean,
         i.item_identifier_clean,
         i.installation_sequence,
         i.created_on AS installed_on,
@@ -625,7 +626,7 @@ cycle_base AS (
 )
 
 
-SELECT c.installation_cycle_id, c.item_identifier_clean, c.installed_on,
+SELECT c.installation_cycle_id, c.host_serial_code_clean, c.item_identifier_clean, c.installed_on,
     c.item_model_code_clean, c.installed_client_clean,
     c.failure_onset_on, c.cycle_end_on, c.cycle_end_reason,
     c.dataset_max_event_on,

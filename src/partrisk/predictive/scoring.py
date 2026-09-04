@@ -12,17 +12,17 @@ from partrisk.predictive import db
 logger = logging.getLogger(__name__)
 
 
-def start_run(model_version: str, feature_version: str | None = None) -> int:
+def start_run(model_version: str) -> int:
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO predictive.model_run
-                    (model_version, feature_version, started_at, status)
-                VALUES (%s, %s, now(), 'RUNNING')
+                    (model_version, started_at, status)
+                VALUES (%s, now(), 'RUNNING')
                 RETURNING run_id
                 """,
-                (model_version, feature_version),
+                (model_version,),
             )
             run_id = cur.fetchone()[0]
         conn.commit()
@@ -58,9 +58,9 @@ def fail_run(run_id: int, error_message: str) -> None:
 
 
 _PREDICTION_COLUMNS = (
-    "run_id", "terminal_serial_code", "part_type", "item_id", "host_serial_code",
+    "run_id", "terminal_serial_code", "host_serial_code",
     "p30", "p60", "p90", "p120", "risk_level", "gate_flagged",
-    "scored_at", "model_version", "feature_version",
+    "scored_at", "model_version",
 )
 
 
@@ -76,6 +76,15 @@ def _check_scores_before_persist(frame: pd.DataFrame) -> None:
     if frame["item_id"].duplicated().any():
         duplicates = frame.loc[frame["item_id"].duplicated(), "item_id"].unique().tolist()
         raise RuntimeError(f"item_id duplikat dalam satu batch: {duplicates}")
+    if frame["host_serial_code"].isna().any():
+        missing = frame.loc[frame["host_serial_code"].isna(), "item_id"].tolist()
+        raise RuntimeError(
+            f"host_serial_code kosong untuk item_id berikut - dibutuhkan sebagai "
+            f"identitas persisten: {missing}"
+        )
+    if frame["host_serial_code"].duplicated().any():
+        duplicates = frame.loc[frame["host_serial_code"].duplicated(), "host_serial_code"].unique().tolist()
+        raise RuntimeError(f"host_serial_code duplikat dalam satu batch: {duplicates}")
     for column in _PREDICTION_PROBABILITY_COLUMNS:
         if frame[column].isna().any():
             raise RuntimeError(f"Kolom {column} mengandung NaN - batal disimpan.")
@@ -86,7 +95,6 @@ def record_predictions(
     frame: pd.DataFrame,
     model_version: str,
     scored_at: pd.Timestamp,
-    feature_version: str | None = None,
 ) -> int:
     """Tulis satu baris `item_prediction` per PART di `frame`. APPEND-ONLY."""
     _check_scores_before_persist(frame)
@@ -94,9 +102,7 @@ def record_predictions(
         (
             run_id,
             None if pd.isna(row.get("terminal_label")) else str(row["terminal_label"]),
-            row.get("item_model_code"),
-            row["item_id"],
-            None if pd.isna(row.get("host_serial_code")) else str(row["host_serial_code"]),
+            str(row["host_serial_code"]),
             float(row["failure_probability_30d"]),
             float(row["failure_probability_60d"]),
             float(row["failure_probability_90d"]),
@@ -105,7 +111,6 @@ def record_predictions(
             bool(row["gate_flagged"]),
             scored_at.to_pydatetime(),
             model_version,
-            feature_version,
         )
         for _, row in frame.iterrows()
     ]
@@ -125,15 +130,15 @@ def record_predictions(
 
 
 def prediction_ids_for_run(run_id: int) -> dict[str, int]:
-    """item_id -> prediction_id untuk satu run."""
+    """host_serial_code -> prediction_id untuk satu run."""
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT item_id, prediction_id FROM predictive.item_prediction WHERE run_id = %s",
+                "SELECT host_serial_code, prediction_id FROM predictive.item_prediction WHERE run_id = %s",
                 (run_id,),
             )
             rows = cur.fetchall()
-    return {item_id: prediction_id for item_id, prediction_id in rows}
+    return {host_serial_code: prediction_id for host_serial_code, prediction_id in rows}
 
 
 def run_and_persist() -> dict:
@@ -153,7 +158,7 @@ def run_and_persist() -> dict:
         row_count = record_predictions(run_id, scores.frame, model_version, scored_at)
 
         prediction_ids = prediction_ids_for_run(run_id)
-        scores.frame["prediction_id"] = scores.frame["item_id"].map(prediction_ids)
+        scores.frame["prediction_id"] = scores.frame["host_serial_code"].map(prediction_ids)
         opened_alert_ids = alert_engine.evaluate_and_open(scores.frame, scored_at)
 
         complete_run(run_id, row_count)

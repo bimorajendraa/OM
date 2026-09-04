@@ -3,7 +3,6 @@ CREATE SCHEMA IF NOT EXISTS predictive;
 CREATE TABLE IF NOT EXISTS predictive.model_run (
     run_id BIGSERIAL PRIMARY KEY,
     model_version TEXT NOT NULL,
-    feature_version TEXT,
     started_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ,
     status TEXT NOT NULL CHECK (status IN ('RUNNING', 'SUCCEEDED', 'FAILED')),
@@ -16,8 +15,6 @@ CREATE TABLE IF NOT EXISTS predictive.item_prediction (
     run_id BIGINT NOT NULL REFERENCES predictive.model_run (run_id),
 
     terminal_serial_code TEXT,
-    part_type TEXT,
-    item_id TEXT NOT NULL,
     host_serial_code TEXT,
 
     p30 DOUBLE PRECISION NOT NULL,
@@ -29,12 +26,9 @@ CREATE TABLE IF NOT EXISTS predictive.item_prediction (
     gate_flagged BOOLEAN NOT NULL,
 
     scored_at TIMESTAMPTZ NOT NULL,
-    model_version TEXT NOT NULL,
-    feature_version TEXT
+    model_version TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS ix_item_prediction_item_scored
-    ON predictive.item_prediction (item_id, scored_at DESC);
 CREATE INDEX IF NOT EXISTS ix_item_prediction_run
     ON predictive.item_prediction (run_id);
 CREATE INDEX IF NOT EXISTS ix_item_prediction_gate_flagged

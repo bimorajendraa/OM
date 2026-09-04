@@ -2,10 +2,8 @@ CREATE TABLE IF NOT EXISTS predictive.alert (
     alert_id BIGSERIAL PRIMARY KEY,
 
     terminal_serial_code TEXT,
-    part_type TEXT,
     item_id TEXT NOT NULL,
-    host_serial_code TEXT,
-    cycle_id TEXT NOT NULL,
+    host_serial_code TEXT NOT NULL,
     inspection_seq INTEGER NOT NULL,
     prediction_id BIGINT REFERENCES predictive.item_prediction (prediction_id),
 
@@ -15,7 +13,6 @@ CREATE TABLE IF NOT EXISTS predictive.alert (
     status TEXT NOT NULL CHECK (status IN ('OPEN', 'RESOLVED')),
 
     resolved_at TIMESTAMPTZ,
-    resolution_reason TEXT,
 
     suppression_until TIMESTAMPTZ,
 
@@ -24,11 +21,10 @@ CREATE TABLE IF NOT EXISTS predictive.alert (
 );
 
 CREATE INDEX IF NOT EXISTS ix_alert_item ON predictive.alert (item_id);
-CREATE INDEX IF NOT EXISTS ix_alert_cycle ON predictive.alert (cycle_id);
 CREATE INDEX IF NOT EXISTS ix_alert_host_serial_code ON predictive.alert (host_serial_code);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_one_open_per_episode
-    ON predictive.alert (item_id, cycle_id, inspection_seq)
+    ON predictive.alert (item_id, host_serial_code, inspection_seq)
     WHERE status = 'OPEN';
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_one_per_prediction

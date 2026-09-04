@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pandas as pd
+
 from partrisk.core import data_reader
 
 _STILL_ACTIVE_REASON = "RIGHT_CENSORED_AT_DATA_END"
@@ -16,8 +18,21 @@ class ItemNotInstalled(LookupError):
         super().__init__(f"PART '{item_id}' tidak punya installation cycle aktif.")
 
 
-def _cycle_no(cycle_id: str) -> int:
-    return int(cycle_id.rsplit(":", 1)[-1])
+class CycleMissingHostSerialCode(RuntimeError):
+    """host_serial_code kosong pada event INSTALLED PART ini - dibutuhkan
+    sebagai identitas cycle (docs/DECISIONS.md §38), jadi kegagalan ini
+    ditolak keras, bukan diam-diam pakai fallback."""
+
+    def __init__(self, item_id: str) -> None:
+        self.item_id = item_id
+        super().__init__(
+            f"PART '{item_id}' terpasang tapi host_serial_code kosong di journal - "
+            "tidak bisa dijadikan identitas cycle."
+        )
+
+
+def _cycle_no(host_serial_code: str) -> int:
+    return int(host_serial_code.rsplit("-", 1)[-1])
 
 
 def ensure_active_cycle(item_id: str) -> dict:
@@ -29,7 +44,9 @@ def ensure_active_cycle(item_id: str) -> dict:
         raise ItemNotInstalled(item_id)
 
     row = active.iloc[-1]
-    cycle_id = row["installation_cycle_id"]
+    cycle_id = row["host_serial_code_clean"]
+    if pd.isna(cycle_id):
+        raise CycleMissingHostSerialCode(item_id)
     return {
         "cycle_id": cycle_id,
         "item_id": row["item_identifier_clean"],
@@ -40,10 +57,11 @@ def ensure_active_cycle(item_id: str) -> dict:
 
 
 def cycle_status(item_id: str, cycle_id: str) -> dict | None:
-    """Status satu cycle tertentu. Return None kalau tidak ditemukan."""
+    """Status satu cycle tertentu (`cycle_id` = host_serial_code). Return
+    None kalau tidak ditemukan."""
     data_end = data_reader.get_dataset_max_event_on()
     cycles = data_reader.get_cycles(item_id, data_end)
-    match = cycles.loc[cycles["installation_cycle_id"] == cycle_id]
+    match = cycles.loc[cycles["host_serial_code_clean"] == cycle_id]
     if match.empty:
         return None
 

@@ -1780,15 +1780,33 @@ sudah ada dari §28, tinggal `host_serial_code` untuk PART yang belum.
 
 **Sempat dipertimbangkan dan ditolak**: mengganti `cycle_id`/tracking
 cycle internal dengan angka urut di ekor `host_serial_code` (REPAIRSEQ),
-supaya tidak ada "dua pengenal siklus" yang kelihatan redundan. Divalidasi
-lewat data nyata (48 cycle nyata, 15 item multi-cycle): 12/48 (25%) cycle
-menunjukkan angka REPAIRSEQ BERUBAH tanpa ada event DISMANTLED/INSTALLED
-nyata di `journal.t_item_journey` - membuktikan REPAIRSEQ digerakkan
-proses lain (kemungkinan administratif gudang/perbaikan), bukan siklus
-pemasangan fisik sesungguhnya. Karena `cycle_id` dipakai untuk locking dan
-korelasi alert->cycle yang harus akurat, angka ini TIDAK bisa dipakai
-menggantikannya - lihat detail proses validasi ini kalau perlu diulang di
-`docs/CODE_NOTES.md` bagian `cycles.py`.
+supaya tidak ada "dua pengenal siklus" yang kelihatan redundan.
+
+**Koreksi 2026-09-04**: validasi AWAL sesi ini (sampel kecil, 48 cycle/15
+item) sempat melaporkan 12/48 (25%) cycle dengan REPAIRSEQ "berubah tanpa
+event nyata" - angka ini KELIRU, berasal dari bug boundary di script ad-hoc
+(event INSTALLED yang menutup cycle ikut ter-exclude dari jendela
+pengecekan, jadi kelihatan seperti "berubah tanpa sebab" padahal event
+penutupnya ADA, cuma tidak ikut terhitung). Divalidasi ULANG dengan metode
+yang benar terhadap SELURUH cycle yang masih aktif (belum pernah ditutup)
+di data operasional: dari 13.857 cycle aktif, cuma **2** (0,014%) yang
+`host_serial_code`-nya berubah tanpa ada cycle yang menutup - dan
+keduanya sama-sama disebabkan kejadian INSTALLED GANDA pada `created_on`
+yang PERSIS SAMA (dua wo_code berbeda, timestamp identik) - kemungkinan
+duplikasi pencatatan, bukan bukti REPAIRSEQ digerakkan proses terpisah
+dari siklus fisik.
+
+**Kesimpulan yang benar**: `host_serial_code` REPAIRSEQ ternyata SANGAT
+selaras dengan cycle_id internal (99,986% cocok pada cycle yang bisa
+diperiksa). Keputusan tetap TIDAK mengganti `cycle_id` - tapi alasannya
+BUKAN "REPAIRSEQ tidak bisa dipercaya" (klaim lama ini salah, sudah
+dikoreksi), melainkan: cycle_id sudah bekerja benar dan murah (byproduct
+dari SQL yang sudah ada), sedangkan mengganti ke REPAIRSEQ butuh menulis
+ulang seluruh rantai deteksi cycle (`installed_event`/`cycle_close`/
+`lifecycle_event_stream` di `data_reader.py::get_cycles()`) untuk manfaat
+yang sekarang terbukti marginal (~0,014% kasus beda) - risiko refactor
+tidak sebanding dengan manfaatnya, bukan karena datanya tidak bisa
+dipercaya.
 
 **Implementasi**: `host_serial_code` ditambahkan sebagai kolom TEXT biasa
 (bukan pengganti apa pun) di `item_prediction` (`migrations/predictive/
@@ -2027,5 +2045,170 @@ mengembalikan inspection yang sama TANPA baris kedua, sementara
 `external_event_id` berbeda tetap menghasilkan dua inspection; tiga guard
 clause data quality). `pytest -q` penuh dijalankan sesudah seluruh
 perubahan.
+
+---
+
+## 38 · `cycle_id` di `predictive.inspection`/`predictive.alert` diganti jadi `host_serial_code`
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user setelah diskusi
+panjang §35 dikoreksi ulang (lihat koreksi di §35 di atas): "cycle id tuh
+ga dipake lagi dimana mana kenapa harus redundan kan nilainya sama sama
+aja" - setelah angka mismatch REPAIRSEQ vs cycle_id internal yang tadinya
+dikira 25% terbukti KELIRU (bug script, angka benar 0,014%), user minta
+`host_serial_code` benar-benar MENGGANTIKAN cycle_id internal di schema
+`predictive`, bukan cuma jadi kolom tambahan.
+
+**Yang diganti**: nilai kolom `predictive.inspection.cycle_id` dan
+`predictive.alert.cycle_id` - sekarang diisi `host_serial_code` (format
+`MODEL-PAIRINGCODE-REPAIRSEQ`), bukan lagi `"<item_id>:<urutan>"`.
+`predictive/cycles.py::ensure_active_cycle()`/`cycle_status()` sekarang
+membaca kolom `host_serial_code_clean` (baru ditambahkan ke output
+`get_cycles()` - murni SELECT tambahan, tidak mengubah CTE apa pun) alih-
+alih `installation_cycle_id`. `_cycle_no()` disesuaikan parsing formatnya
+(`rsplit("-", 1)` alih-alih `rsplit(":", 1)`).
+
+**Yang TIDAK diganti - dan KENAPA**: `data_reader.py::get_cycles()`'s
+rantai deteksi batas cycle (`installed_event`/`cycle_close`/
+`lifecycle_event_stream`, dan `installation_cycle_id` internal yang
+dihasilkannya) TIDAK disentuh - dipakai UTUH oleh `core/features.py`
+(training/prediction, degradation features) dan `engines/failure/gate.py`
+(evaluasi lifecycle-based). Rantai ini menentukan `cycle_end_reason`/
+`failure_onset_on` (FAILURE vs RETURNED vs DISMANTLED vs REINSTALL_
+WITHOUT_RECORDED_FAILURE) - informasi yang `host_serial_code` TIDAK
+pernah bisa berikan (dia cuma angka urut REPAIRSEQ, tidak tahu ALASAN
+sebuah cycle berakhir). Jadi ini BUKAN "hapus cycle_id di mana-mana" -
+mesin deteksi cycle yang dipakai model tetap ada dan tetap sama
+kompleksnya seperti sebelumnya; yang berubah HANYA identitas yang dipakai
+lapisan `predictive` (locking/alert/inspection) untuk MELABELI cycle yang
+sudah terdeteksi itu.
+
+**Prasyarat yang divalidasi SEBELUM mengubah kode** (bukan asumsi):
+- `host_serial_code` 100% populated pada SEMUA event INSTALLED kategori
+  PART (38.213/38.213) - jadi tidak ada celah "item aktif tanpa
+  host_serial_code" yang bisa bikin locking/alert gagal diam-diam.
+- Segmen REPAIRSEQ (bagian terakhir setelah `-`) SELALU digit murni pada
+  seluruh 24 nilai distinct yang pernah tercatat - aman di-`int()`-kan
+  untuk `cycle_no`.
+- Dari 13.857 cycle yang MASIH AKTIF (belum pernah ditutup) di data
+  operasional, cuma 2 (0,014%) yang `host_serial_code`-nya berbeda dari
+  yang tercatat saat instalasi - dan keduanya sama-sama disebabkan DUA
+  event INSTALLED tercatat pada `created_on` yang PERSIS SAMA (wo_code
+  beda) - kemungkinan duplikasi pencatatan di sumber data, bukan bukti
+  REPAIRSEQ digerakkan proses terpisah dari siklus fisik (klaim lama ini
+  sudah dikoreksi di §35).
+
+**Konsekuensi pada data lama**: baris `predictive.inspection`/
+`predictive.alert` yang SUDAH ADA dengan `cycle_id` format lama
+(`item_id:N`, dari smoke test sesi-sesi sebelumnya) DIHAPUS sebagai
+prasyarat perubahan ini - format lama dan baru tidak bisa dibandingkan
+langsung (`AlertCycleMismatch` akan SELALU mismatch kalau dibiarkan
+campur). Tidak ada risiko data produksi hilang - tabel `predictive.*`
+belum pernah menyimpan data produksi sungguhan (poin yang sama berulang
+sepanjang sesi ini).
+
+**Verifikasi**: `pytest -q` penuh (termasuk `test_ensure_active_cycle_...`/
+`closed_cycle` fixture yang diperbarui untuk membaca `host_serial_code`,
+bukan `installation_cycle_id`, sebagai `cycle_id`).
+
+---
+
+## 39 · Kolom mati `feature_version` dibuang dari `model_run`/`item_prediction`
+
+**Status**: berlaku, 2026-09-04. Permintaan eksplisit user: audit seluruh
+kolom tabel `predictive.*`, buang yang tidak dipakai - `feature_version`
+disebut eksplisit sebagai contoh.
+
+**Temuan**: `feature_version` di kedua tabel (`model_run`, `item_prediction`)
+SELALU NULL di produksi - `scoring.py::start_run()`/`record_predictions()`
+punya parameter `feature_version` (default `None`), tapi satu-satunya
+pemanggil sungguhan (`run_and_persist()`) TIDAK PERNAH mengisinya. Dicek
+lewat grep menyeluruh `src/`+`tests/` - tidak ada kode lain yang menulis
+ATAU membaca kolom ini sama sekali.
+
+**Kolom lain SUDAH dicek dan TIDAK dibuang** (semua terbukti ditulis DAN
+punya kegunaan - lihat kode masing-masing): `model_run.started_at`/
+`created_at`/`updated_at` di semua tabel adalah jejak audit yang memang
+diisi (beda kategori dari `feature_version` yang TIDAK PERNAH diisi sama
+sekali) - dipertahankan.
+
+**Implementasi**: kolom dibuang dari `migrations/predictive/0001_init.sql`
+(CREATE TABLE diedit langsung) + `ALTER TABLE ... DROP COLUMN` dijalankan
+manual ke DB live (tabel belum pernah menyimpan data produksi, pola yang
+sama dipakai sepanjang sesi ini). `scoring.py::start_run()`/
+`record_predictions()` kehilangan parameter `feature_version`,
+`_PREDICTION_COLUMNS` diperbarui.
+
+**Verifikasi**: `pytest -q` penuh lolos.
+
+---
+
+## 40 · `item_id`/`part_type`/`resolution_reason` dibuang dari `item_prediction`/`alert`; `cycle_id` di `inspection` selesai diganti `host_serial_code`
+
+**Status**: berlaku, 2026-09-04. Lanjutan §38-39, permintaan eksplisit
+user untuk terus menyederhanakan skema `predictive` sejauh aman - tiga
+keputusan terpisah dalam satu pass:
+
+**1. `item_prediction.item_id` dibuang.** Aman karena `item_prediction`
+APPEND-ONLY dan `item_id` di situ HANYA dipakai untuk join sesaat di
+memori tepat setelah scoring (`prediction_ids_for_run()` dipanggil dalam
+detik yang sama dengan `record_predictions()`, sebelum ada kemungkinan
+perbaikan mengubah apa pun) - `host_serial_code` sudah cukup untuk itu.
+`prediction_ids_for_run()` diubah kembalikan mapping `host_serial_code ->
+prediction_id`, `run_and_persist()` join lewat
+`scores.frame["host_serial_code"]`.
+
+**2. `alert.item_id` DIPERTAHANKAN** - koreksi penting atas kesalahan awal
+saya sendiri: sempat direncanakan ikut dibuang (disamakan dengan
+`item_prediction`), tapi ternyata BEDA kasus. `open_alerts_by_item()`
+harus bisa menemukan "apakah item X masih punya alert OPEN" KAPAN PUN
+setelah alert dibuka - bisa berhari-hari kemudian, setelah `host_serial_code`
+item itu SUDAH BERUBAH karena ada perbaikan lain di antaranya. Kalau cuma
+mengandalkan `host_serial_code`, pencarian itu akan gagal diam-diam
+tepat pada kasus yang paling penting (item sudah diperbaiki sejak alert
+dibuka). `item_id` (`item_pairing_code`) TETAP satu-satunya nilai yang
+stabil lintas perbaikan.
+
+**3. `alert.part_type`/`resolution_reason` dibuang; `inspection.cycle_id`
+diganti `host_serial_code` (menyelesaikan §38 yang baru sebagian).**
+`part_type` murni informasional dan merupakan segmen pertama
+`host_serial_code` (divalidasi 42.656/42.656 event INSTALLED - 0 yang
+segmen tengahnya beda dari `item_pairing_code`, jadi aman diasumsikan
+segmen pertama = `item_model_code` juga konsisten). `resolution_reason`
+dibuang atas keputusan eksplisit user WALAU kolom itu benar-benar terisi
+(beda kategori dari `feature_version` §39 yang memang tidak pernah
+diisi) - user memutuskan cukup tahu `status=RESOLVED` saja, detail
+kenapa/gimana tidak perlu disimpan.
+
+**Diperiksa dan SENGAJA TIDAK diikutkan** (dijelaskan ke user, bukan
+dibuang begitu saja):
+- **`item_id` internal** (variabel Python dipakai locking/query ke
+  `journal`/`inventory`) - TIDAK PERNAH jadi kandidat, tidak berhubungan
+  dengan kolom tabel sama sekali.
+- **`item_type`** (fitur model, `LOCAL_DENSITY_FEATURES`) - BUKAN kolom
+  di `predictive.*` sama sekali (cuma di memori/CLI), dan beda kategori
+  total dari `host_serial_code` (sumber datanya `journal.item_type`,
+  bukan bagian dari `host_serial_code`) - menghapusnya berarti mengubah
+  fitur model, bukan membersihkan skema.
+- **`inspection_seq`** - dievaluasi eksplisit (redundansi struktural
+  rendah - constraint unique-OPEN sudah cukup dijaga
+  `(item_id, host_serial_code)` tanpa perlu `inspection_seq`), tapi user
+  memilih tetap menyimpannya sebagai satu-satunya info "sudah berapa kali
+  PART ini diperbaiki dalam cycle yang sama."
+- **`alert.item_id` sebagai kolom** - bisa secara teknis diturunkan dari
+  `split_part(host_serial_code, '-', 2)`, tapi dipertahankan demi index
+  langsung (`ix_alert_item`) dan menghindari ketergantungan parsing
+  string di setiap query - trade-off yang disadari, bukan keterbatasan.
+
+**Implementasi**: migrasi 0001/0002/0003 diedit langsung + `ALTER TABLE`
+matching dijalankan manual ke DB live (tabel kosong, pola sesi ini).
+`scoring.py`, `alerts.py` (paling banyak berubah - `_ALERT_COLUMNS`,
+`open_alerts_by_item()` tidak lagi pakai index posisi `row[3]` yang
+rapuh, semua query `cycle_id` -> `host_serial_code`), `inspections.py`,
+`api/schemas.py` disesuaikan.
+
+**Verifikasi**: `pytest -q` penuh lolos (satu test sempat luput -
+`test_record_inspection_menaikkan_seq_dalam_cycle_yang_sama` masih
+merujuk `["cycle_id"]` pada dict hasil `record_inspection()`, diperbaiki
+jadi `["host_serial_code"]`).
 
 ---

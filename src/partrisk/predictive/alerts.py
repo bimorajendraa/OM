@@ -12,10 +12,9 @@ from partrisk.predictive import db
 from partrisk.predictive import inspections
 
 _ALERT_COLUMNS = (
-    "alert_id", "terminal_serial_code", "part_type", "item_id", "host_serial_code",
-    "cycle_id", "inspection_seq",
+    "alert_id", "terminal_serial_code", "item_id", "host_serial_code", "inspection_seq",
     "prediction_id", "opened_at", "opened_score", "status",
-    "resolved_at", "resolution_reason", "suppression_until", "created_at", "updated_at",
+    "resolved_at", "suppression_until", "created_at", "updated_at",
 )
 _ALERT_SELECT_COLUMNS = ", ".join(_ALERT_COLUMNS)
 
@@ -34,15 +33,16 @@ class AlertNotOpen(ValueError):
 
 
 class AlertCycleMismatch(ValueError):
-    """Item sudah pindah cycle sejak alert ini dibuka."""
+    """Item sudah pindah cycle sejak alert ini dibuka (cycle diidentifikasi
+    lewat host_serial_code - docs/DECISIONS.md §38)."""
 
-    def __init__(self, alert_id: int, alert_cycle_id: str, current_cycle_id: str) -> None:
+    def __init__(self, alert_id: int, alert_host_serial_code: str, current_host_serial_code: str) -> None:
         self.alert_id = alert_id
-        self.alert_cycle_id = alert_cycle_id
-        self.current_cycle_id = current_cycle_id
+        self.alert_host_serial_code = alert_host_serial_code
+        self.current_host_serial_code = current_host_serial_code
         super().__init__(
-            f"Alert {alert_id} dibuka untuk cycle {alert_cycle_id!r}, tapi cycle aktif "
-            f"item sekarang {current_cycle_id!r} - kemungkinan item sudah dilepas/dipasang ulang."
+            f"Alert {alert_id} dibuka untuk cycle {alert_host_serial_code!r}, tapi cycle aktif "
+            f"item sekarang {current_host_serial_code!r} - kemungkinan item sudah dilepas/dipasang ulang."
         )
 
 
@@ -73,28 +73,28 @@ def open_alerts_by_item(item_ids: list[str] | None = None) -> dict[str, dict]:
         with conn.cursor() as cur:
             cur.execute(query, params)
             rows = cur.fetchall()
-    return {row[3]: _row_to_alert(row) for row in rows}
+    return {alert["item_id"]: alert for alert in (_row_to_alert(row) for row in rows)}
 
 
-def _next_inspection_seq(cur, cycle_id: str) -> int:
+def _next_inspection_seq(cur, host_serial_code: str) -> int:
     cur.execute(
-        "SELECT COALESCE(MAX(inspection_seq), -1) + 1 FROM predictive.inspection WHERE cycle_id = %s",
-        (cycle_id,),
+        "SELECT COALESCE(MAX(inspection_seq), -1) + 1 FROM predictive.inspection WHERE host_serial_code = %s",
+        (host_serial_code,),
     )
     return cur.fetchone()[0]
 
 
-def _active_suppression(cur, item_id: str, cycle_id: str) -> tuple[pd.Timestamp, float] | None:
+def _active_suppression(cur, item_id: str, host_serial_code: str) -> tuple[pd.Timestamp, float] | None:
     """Baris alert terbaru (kalau ada) untuk item+cycle ini yang masih dalam
     masa suppression."""
     cur.execute(
         """
         SELECT suppression_until, opened_score FROM predictive.alert
-        WHERE item_id = %s AND cycle_id = %s
+        WHERE item_id = %s AND host_serial_code = %s
           AND status = 'RESOLVED' AND suppression_until IS NOT NULL
         ORDER BY resolved_at DESC LIMIT 1
         """,
-        (item_id, cycle_id),
+        (item_id, host_serial_code),
     )
     row = cur.fetchone()
     if row is None or row[0] is None:
@@ -108,20 +108,18 @@ def _active_suppression(cur, item_id: str, cycle_id: str) -> tuple[pd.Timestamp,
 def _auto_resolve_if_cycle_closed(cur, alert: dict) -> dict | None:
     """Return baris alert yang baru di-RESOLVE (kalau cycle-nya memang sudah
     tertutup), None kalau cycle masih aktif."""
-    status = cycle_store.cycle_status(alert["item_id"], alert["cycle_id"])
+    status = cycle_store.cycle_status(alert["item_id"], alert["host_serial_code"])
     if status is None or status["is_active"]:
         return None
-    end_reason = status["end_reason"]
 
     cur.execute(
         f"""
         UPDATE predictive.alert
-        SET status = 'RESOLVED', resolved_at = now(),
-            resolution_reason = %s, updated_at = now()
+        SET status = 'RESOLVED', resolved_at = now(), updated_at = now()
         WHERE alert_id = %s AND status = 'OPEN'
         RETURNING {_ALERT_SELECT_COLUMNS}
         """,
-        (f"OPERATIONAL_CYCLE_CLOSED:{end_reason}", alert["alert_id"]),
+        (alert["alert_id"],),
     )
     updated = cur.fetchone()
     if updated is None:
@@ -190,35 +188,31 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
 
         try:
             cycle = cycle_store.ensure_active_cycle(item_id)
-        except cycle_store.ItemNotInstalled:
+        except (cycle_store.ItemNotInstalled, cycle_store.CycleMissingHostSerialCode):
             continue
-        cycle_id = cycle["cycle_id"]
+        host_serial_code = cycle["cycle_id"]
 
         terminal_serial_code = row.get("terminal_label")
         terminal_serial_code = None if pd.isna(terminal_serial_code) else str(terminal_serial_code)
-        part_type = row.get("item_model_code")
-        part_type = None if pd.isna(part_type) else str(part_type)
-        host_serial_code = row.get("host_serial_code")
-        host_serial_code = None if pd.isna(host_serial_code) else str(host_serial_code)
         prediction_id = row.get("prediction_id")
         prediction_id = None if pd.isna(prediction_id) else int(prediction_id)
 
         with db.connect() as conn:
             with conn.cursor() as cur:
                 cycle_store.lock_item(cur, item_id)
-                next_seq = _next_inspection_seq(cur, cycle_id)
+                next_seq = _next_inspection_seq(cur, host_serial_code)
 
                 cur.execute(
                     """
                     SELECT 1 FROM predictive.alert
-                    WHERE item_id = %s AND cycle_id = %s AND inspection_seq = %s AND status = 'OPEN'
+                    WHERE item_id = %s AND host_serial_code = %s AND inspection_seq = %s AND status = 'OPEN'
                     """,
-                    (item_id, cycle_id, next_seq),
+                    (item_id, host_serial_code, next_seq),
                 )
                 if cur.fetchone() is not None:
                     continue
 
-                suppression = _active_suppression(cur, item_id, cycle_id)
+                suppression = _active_suppression(cur, item_id, host_serial_code)
                 if suppression is not None:
                     _, previous_score = suppression
                     if not _emergency_override(score, previous_score):
@@ -227,13 +221,13 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
                 cur.execute(
                     """
                     INSERT INTO predictive.alert
-                        (terminal_serial_code, part_type, item_id, host_serial_code, cycle_id,
+                        (terminal_serial_code, item_id, host_serial_code,
                          inspection_seq, prediction_id, opened_at, opened_score, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN')
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'OPEN')
                     RETURNING alert_id
                     """,
                     (
-                        terminal_serial_code, part_type, item_id, host_serial_code, cycle_id,
+                        terminal_serial_code, item_id, host_serial_code,
                         next_seq, prediction_id, scored_at.to_pydatetime(), score,
                     ),
                 )
@@ -256,14 +250,14 @@ def resolve_with_inspection(
         raise AlertNotOpen(alert_id, alert["status"])
 
     current_cycle = cycle_store.ensure_active_cycle(alert["item_id"])
-    if current_cycle["cycle_id"] != alert["cycle_id"]:
+    if current_cycle["cycle_id"] != alert["host_serial_code"]:
         with db.connect() as conn:
             with conn.cursor() as cur:
                 auto_resolved = _auto_resolve_if_cycle_closed(cur, alert)
             conn.commit()
         if auto_resolved is not None:
             raise AlertNotOpen(alert_id, auto_resolved["status"])
-        raise AlertCycleMismatch(alert_id, alert["cycle_id"], current_cycle["cycle_id"])
+        raise AlertCycleMismatch(alert_id, alert["host_serial_code"], current_cycle["cycle_id"])
 
     performed_at_value = (
         performed_at.to_pydatetime() if isinstance(performed_at, pd.Timestamp) else performed_at
@@ -284,17 +278,17 @@ def resolve_with_inspection(
                 raise AlertNotOpen(alert_id, row[0])
 
             cycle_store.lock_item(cur, alert["item_id"])
-            next_seq = _next_inspection_seq(cur, alert["cycle_id"])
+            next_seq = _next_inspection_seq(cur, alert["host_serial_code"])
 
             cur.execute(
                 f"""
                 INSERT INTO predictive.inspection
-                    (item_id, cycle_id, inspection_seq, alert_id, external_event_id, performed_at)
+                    (item_id, host_serial_code, inspection_seq, alert_id, external_event_id, performed_at)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING {inspections._SELECT_COLUMNS}
                 """,
                 (
-                    alert["item_id"], alert["cycle_id"], next_seq, alert_id,
+                    alert["item_id"], alert["host_serial_code"], next_seq, alert_id,
                     external_event_id, performed_at_value,
                 ),
             )
@@ -303,7 +297,7 @@ def resolve_with_inspection(
             cur.execute(
                 f"""
                 UPDATE predictive.alert
-                SET status = 'RESOLVED', resolved_at = %s, resolution_reason = 'INSPECTION_RECORDED',
+                SET status = 'RESOLVED', resolved_at = %s,
                     suppression_until = %s, updated_at = now()
                 WHERE alert_id = %s
                 RETURNING {_ALERT_SELECT_COLUMNS}

@@ -8,7 +8,7 @@ from partrisk.predictive import cycles as cycle_store
 from partrisk.predictive import db
 
 _COLUMNS = (
-    "inspection_id", "item_id", "cycle_id", "inspection_seq", "alert_id",
+    "inspection_id", "item_id", "host_serial_code", "inspection_seq", "alert_id",
     "external_event_id", "performed_at", "created_at",
 )
 
@@ -40,7 +40,7 @@ def record_inspection(
 ) -> dict:
     """Catat satu inspection untuk `item_id`, dalam cycle aktifnya saat ini."""
     cycle = cycle_store.ensure_active_cycle(item_id)
-    cycle_id = cycle["cycle_id"]
+    host_serial_code = cycle["cycle_id"]
     performed_at_value = (
         performed_at.to_pydatetime() if isinstance(performed_at, pd.Timestamp) else performed_at
     )
@@ -50,19 +50,19 @@ def record_inspection(
             cycle_store.lock_item(cur, item_id)
             cur.execute(
                 "SELECT COALESCE(MAX(inspection_seq), -1) + 1 "
-                "FROM predictive.inspection WHERE cycle_id = %s",
-                (cycle_id,),
+                "FROM predictive.inspection WHERE host_serial_code = %s",
+                (host_serial_code,),
             )
             next_seq = cur.fetchone()[0]
 
             cur.execute(
                 f"""
                 INSERT INTO predictive.inspection
-                    (item_id, cycle_id, inspection_seq, alert_id, external_event_id, performed_at)
+                    (item_id, host_serial_code, inspection_seq, alert_id, external_event_id, performed_at)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING {_SELECT_COLUMNS}
                 """,
-                (cycle["item_id"], cycle_id, next_seq, alert_id, external_event_id, performed_at_value),
+                (cycle["item_id"], host_serial_code, next_seq, alert_id, external_event_id, performed_at_value),
             )
             row = cur.fetchone()
         conn.commit()

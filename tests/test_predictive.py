@@ -69,13 +69,15 @@ def test_record_predictions_menulis_baris_sesuai_frame(cleanup_run_ids):
 
     frame = pd.DataFrame([
         {
-            "item_id": "TEST-ITEM-001", "terminal_label": "T1", "item_model_code": "0000001",
+            "item_id": "TEST-ITEM-001", "terminal_label": "T1",
+            "host_serial_code": "0000001-TEST-ITEM-001-00",
             "failure_probability_30d": 0.1, "failure_probability_60d": 0.2,
             "failure_probability_90d": 0.3, "failure_probability_120d": 0.4,
             "failure_risk_level": "LOW", "gate_flagged": False,
         },
         {
-            "item_id": "TEST-ITEM-002", "terminal_label": None, "item_model_code": "0000002",
+            "item_id": "TEST-ITEM-002", "terminal_label": None,
+            "host_serial_code": "0000002-TEST-ITEM-002-00",
             "failure_probability_30d": 0.9, "failure_probability_60d": 0.95,
             "failure_probability_90d": 0.97, "failure_probability_120d": 0.99,
             "failure_risk_level": "HIGH", "gate_flagged": True,
@@ -88,14 +90,14 @@ def test_record_predictions_menulis_baris_sesuai_frame(cleanup_run_ids):
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT item_id, terminal_serial_code, part_type, p30, risk_level, gate_flagged "
-                "FROM predictive.item_prediction WHERE run_id = %s ORDER BY item_id",
+                "SELECT host_serial_code, terminal_serial_code, p30, risk_level, gate_flagged "
+                "FROM predictive.item_prediction WHERE run_id = %s ORDER BY host_serial_code",
                 (run_id,),
             )
             rows = cur.fetchall()
     assert rows == [
-        ("TEST-ITEM-001", "T1", "0000001", 0.1, "LOW", False),
-        ("TEST-ITEM-002", None, "0000002", 0.9, "HIGH", True),
+        ("0000001-TEST-ITEM-001-00", "T1", 0.1, "LOW", False),
+        ("0000002-TEST-ITEM-002-00", None, 0.9, "HIGH", True),
     ]
 
 
@@ -105,7 +107,8 @@ def test_record_predictions_append_only_tidak_menimpa_baris_lama(cleanup_run_ids
     cleanup_run_ids.append(run_id)
 
     frame = pd.DataFrame([{
-        "item_id": "TEST-ITEM-003", "terminal_label": None, "item_model_code": "0000003",
+        "item_id": "TEST-ITEM-003", "terminal_label": None,
+        "host_serial_code": "0000003-TEST-ITEM-003-00",
         "failure_probability_30d": 0.5, "failure_probability_60d": 0.5,
         "failure_probability_90d": 0.5, "failure_probability_120d": 0.5,
         "failure_risk_level": "MEDIUM", "gate_flagged": False,
@@ -118,7 +121,7 @@ def test_record_predictions_append_only_tidak_menimpa_baris_lama(cleanup_run_ids
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*) FROM predictive.item_prediction "
-                "WHERE run_id = %s AND item_id = 'TEST-ITEM-003'",
+                "WHERE run_id = %s AND host_serial_code = '0000003-TEST-ITEM-003-00'",
                 (run_id,),
             )
             count = cur.fetchone()[0]
@@ -127,7 +130,8 @@ def test_record_predictions_append_only_tidak_menimpa_baris_lama(cleanup_run_ids
 
 def _valid_prediction_row(item_id: str = "TEST-ITEM-GUARD") -> dict:
     return {
-        "item_id": item_id, "terminal_label": None, "item_model_code": "0000000",
+        "item_id": item_id, "terminal_label": None,
+        "host_serial_code": f"0000000-{item_id}-00",
         "failure_probability_30d": 0.1, "failure_probability_60d": 0.2,
         "failure_probability_90d": 0.3, "failure_probability_120d": 0.4,
         "failure_risk_level": "LOW", "gate_flagged": False,
@@ -155,20 +159,23 @@ def test_record_predictions_menolak_probabilitas_nan():
 
 @needs_database
 def test_prediction_ids_for_run_memetakan_item_id_ke_prediction_id(cleanup_run_ids):
-    """docs/DECISIONS.md §32 - dipakai run_and_persist() menautkan
-    alert.prediction_id ke baris item_prediction yang memicunya."""
+    """docs/DECISIONS.md §32/§38 - dipakai run_and_persist() menautkan
+    alert.prediction_id ke baris item_prediction yang memicunya, dipetakan
+    lewat host_serial_code (bukan item_id - kolom itu sudah dibuang §39)."""
     run_id = scoring.start_run("test-model-v0")
     cleanup_run_ids.append(run_id)
 
     frame = pd.DataFrame([
         {
-            "item_id": "TEST-ITEM-010", "terminal_label": None, "item_model_code": "0000010",
+            "item_id": "TEST-ITEM-010", "terminal_label": None,
+            "host_serial_code": "0000010-TEST-ITEM-010-00",
             "failure_probability_30d": 0.1, "failure_probability_60d": 0.1,
             "failure_probability_90d": 0.1, "failure_probability_120d": 0.1,
             "failure_risk_level": "LOW", "gate_flagged": False,
         },
         {
-            "item_id": "TEST-ITEM-011", "terminal_label": None, "item_model_code": "0000011",
+            "item_id": "TEST-ITEM-011", "terminal_label": None,
+            "host_serial_code": "0000011-TEST-ITEM-011-00",
             "failure_probability_30d": 0.9, "failure_probability_60d": 0.9,
             "failure_probability_90d": 0.9, "failure_probability_120d": 0.9,
             "failure_risk_level": "HIGH", "gate_flagged": True,
@@ -179,16 +186,16 @@ def test_prediction_ids_for_run_memetakan_item_id_ke_prediction_id(cleanup_run_i
 
     mapping = scoring.prediction_ids_for_run(run_id)
 
-    assert set(mapping) == {"TEST-ITEM-010", "TEST-ITEM-011"}
+    assert set(mapping) == {"0000010-TEST-ITEM-010-00", "0000011-TEST-ITEM-011-00"}
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT prediction_id FROM predictive.item_prediction "
-                "WHERE run_id = %s AND item_id = 'TEST-ITEM-011'",
+                "WHERE run_id = %s AND host_serial_code = '0000011-TEST-ITEM-011-00'",
                 (run_id,),
             )
             (expected_id,) = cur.fetchone()
-    assert mapping["TEST-ITEM-011"] == expected_id
+    assert mapping["0000011-TEST-ITEM-011-00"] == expected_id
 
 
 @needs_database
@@ -242,7 +249,10 @@ def test_ensure_active_cycle_baca_dari_data_operasional(scorable_item):
 
     assert cycle["item_id"] == scorable_item
     assert cycle["is_active"] is True
-    assert cycle["cycle_id"].startswith(scorable_item)
+    assert scorable_item in cycle["cycle_id"], (
+        "cycle_id sekarang = host_serial_code (docs/DECISIONS.md §38), "
+        "item_id muncul sebagai segmen tengah MODEL-item_id-REPAIRSEQ"
+    )
 
 
 @needs_database
@@ -275,7 +285,7 @@ def test_record_inspection_menaikkan_seq_dalam_cycle_yang_sama(
     first = inspections.record_inspection(scorable_item, now)
     second = inspections.record_inspection(scorable_item, now)
 
-    assert first["cycle_id"] == second["cycle_id"], (
+    assert first["host_serial_code"] == second["host_serial_code"], (
         "minor repair tidak boleh membuka cycle baru - harus dalam cycle aktif yang sama"
     )
     assert second["inspection_seq"] == first["inspection_seq"] + 1
@@ -348,12 +358,13 @@ def test_evaluate_and_open_menautkan_alert_ke_prediction_id(
     scored_at = pd.Timestamp.now(tz="UTC")
 
     frame = _flagged_frame(scorable_item, 0.5)
+    frame["host_serial_code"] = cycle_store.ensure_active_cycle(scorable_item)["cycle_id"]
     frame["failure_probability_60d"] = 0.5
     frame["failure_probability_90d"] = 0.5
     frame["failure_probability_120d"] = 0.5
     frame["failure_risk_level"] = "MEDIUM"
     scoring.record_predictions(run_id, frame, "test-model-v0", scored_at)
-    frame["prediction_id"] = frame["item_id"].map(scoring.prediction_ids_for_run(run_id))
+    frame["prediction_id"] = frame["host_serial_code"].map(scoring.prediction_ids_for_run(run_id))
 
     opened_ids = alert_engine.evaluate_and_open(frame, scored_at)
     assert len(opened_ids) == 1
@@ -416,13 +427,16 @@ def closed_cycle():
             all_cycles["cycle_end_reason"] == "RIGHT_CENSORED_AT_DATA_END", "item_identifier_clean"
         ]
     )
-    candidate = closed.loc[closed["item_identifier_clean"].isin(active_items)]
+    candidate = closed.loc[
+        closed["item_identifier_clean"].isin(active_items)
+        & closed["host_serial_code_clean"].notna()
+    ]
     if candidate.empty:
         pytest.skip("tidak ada item dengan cycle tertutup DAN cycle aktif untuk diuji")
     row = candidate.iloc[0]
     return {
         "item_id": row["item_identifier_clean"],
-        "cycle_id": row["installation_cycle_id"],
+        "cycle_id": row["host_serial_code_clean"],
         "end_reason": row["cycle_end_reason"],
     }
 
@@ -439,17 +453,17 @@ def cleanup_alert_ids():
         conn.commit()
 
 
-def _insert_open_alert(item_id: str, cycle_id: str) -> int:
+def _insert_open_alert(item_id: str, host_serial_code: str) -> int:
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO predictive.alert
-                    (item_id, cycle_id, inspection_seq, opened_at, opened_score, status)
+                    (item_id, host_serial_code, inspection_seq, opened_at, opened_score, status)
                 VALUES (%s, %s, 0, now(), 0.5, 'OPEN')
                 RETURNING alert_id
                 """,
-                (item_id, cycle_id),
+                (item_id, host_serial_code),
             )
             alert_id = cur.fetchone()[0]
         conn.commit()
@@ -468,7 +482,6 @@ def test_auto_resolve_closed_cycles_menutup_alert_pada_cycle_yang_sudah_berakhir
     assert alert_id in resolved_ids
     alert = alert_engine.get_alert(alert_id)
     assert alert["status"] == "RESOLVED"
-    assert alert["resolution_reason"] == f"OPERATIONAL_CYCLE_CLOSED:{closed_cycle['end_reason']}"
 
 
 @needs_database
@@ -487,7 +500,6 @@ def test_resolve_with_inspection_auto_resolve_alert_pada_cycle_lama(
 
     alert = alert_engine.get_alert(alert_id)
     assert alert["status"] == "RESOLVED"
-    assert alert["resolution_reason"] == f"OPERATIONAL_CYCLE_CLOSED:{closed_cycle['end_reason']}"
 
 
 @needs_database

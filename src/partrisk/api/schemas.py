@@ -48,7 +48,7 @@ class InspectionResult(BaseModel):
 
     inspection_id: int
     item_id: str
-    cycle_id: str
+    host_serial_code: str
     inspection_seq: int
     alert_id: int | None
     external_event_id: str | None
@@ -61,16 +61,13 @@ class AlertResult(BaseModel):
 
     alert_id: int
     terminal_serial_code: str | None
-    part_type: str | None
     item_id: str
-    host_serial_code: str | None
-    cycle_id: str
+    host_serial_code: str
     inspection_seq: int
     status: Literal["OPEN", "RESOLVED"]
     opened_at: str
     opened_score: float
     resolved_at: str | None
-    resolution_reason: str | None
     suppression_until: str | None
 
 

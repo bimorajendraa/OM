@@ -641,7 +641,7 @@ Komentar penjelasan (termasuk docstring panjang berisi alasan/riwayat desain) ya
 
 > Pencatatan tindakan teknisi/aplikasi eksternal (predictive.inspection) - lihat docs/DATABASE.md dan docs §10/22/23 master prompt refactor.
 >
-> "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): tidak ada klasifikasi jenis - satu POST berarti satu PERBAIKAN terjadi, apa pun bentuknya (keputusan user, docs/DECISIONS.md §25 update), BUKAN sekadar "diperiksa". Tidak ada outcome/remark/external_* juga - body POST /api/v1/inspections cuma host_serial_code (docs/DECISIONS.md §28), tidak ada idempotency key eksternal (retry membuat baris baru, trade-off yang disetujui eksplisit).
+> "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): tidak ada klasifikasi jenis - satu POST berarti satu PERBAIKAN terjadi, apa pun bentuknya (keputusan user, docs/DECISIONS.md §25 update), BUKAN sekadar "diperiksa". Tidak ada outcome/remark juga - body POST /api/v1/inspections cuma host_serial_code (docs/DECISIONS.md §28) + external_event_id opsional untuk idempotency retry (docs/DECISIONS.md §37).
 >
 > Minor repair TIDAK menutup installation cycle - inspection_seq naik DALAM cycle aktif yang sama (predictive/cycles.py), bukan membuka cycle baru.
 

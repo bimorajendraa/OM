@@ -44,7 +44,7 @@ jangan mengedit file lama yang sudah pernah dijalankan di production.
 
 ```
 predictive.model_run                                            -- Milestone 2
-  run_id, model_version, feature_version, started_at, completed_at,
+  run_id, model_version, started_at, completed_at,
   status (RUNNING/SUCCEEDED/FAILED), row_count, error_message
 
 predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
@@ -52,17 +52,20 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
   terminal_serial_code  -- serial code FISIK terminal (frame["terminal_label"]),
                          -- BUKAN ID internal terminal_inventory_item_id yang
                          -- dipakai live/filtering di serving/batch.py (§30)
-  part_type, item_id,
-  host_serial_code       -- serial code FISIK part (§35), kolom JOIN untuk
-                          -- tim eksternal - BUKAN pengganti item_id/cycle_id
+  host_serial_code NOT NULL   -- serial code FISIK part (§35) - satu-satunya
+                               -- identitas PART di tabel ini sejak §40;
+                               -- item_id DIBUANG (§40) - append-only + join
+                               -- ke prediction_id cuma sesaat setelah
+                               -- scoring, host_serial_code sudah cukup.
   p30, p60, p90, p120, risk_level, gate_flagged,
-  scored_at, model_version, feature_version
+  scored_at, model_version
 
 predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, RENAME §31
-  inspection_id, item_id, cycle_id, inspection_seq (UNIK per cycle),
+  inspection_id, item_id, host_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id),
+  inspection_seq (UNIK per host_serial_code),
   alert_id (nullable), external_event_id (nullable, UNIK - §37),
   performed_at, created_at
-  UNIQUE(cycle_id, inspection_seq)
+  UNIQUE(host_serial_code, inspection_seq)
   UNIQUE(external_event_id)
   -- Sengaja TIDAK ADA outcome/action_code/remark (dibuang §28) - body
   -- POST /api/v1/inspections cuma host_serial_code + external_event_id
@@ -71,34 +74,40 @@ predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, R
   -- pemanggil, dipakai mencegah inspection duplikat kalau request di-retry
   -- (mis. timeout). NULL diperbolehkan berkali-kali (Postgres UNIQUE tidak
   -- membatasi NULL berulang).
-  -- cycle_id BUKAN FK (tabel item_cycle dihapus §30) - lihat "Cycle" di
+  -- host_serial_code BUKAN FK (tabel item_cycle dihapus §30) - lihat "Cycle" di
   -- bawah untuk cara cycle dibaca sekarang.
 
 predictive.alert                                                  -- Milestone 5
   alert_id, terminal_serial_code (serial code fisik terminal, sama seperti
-  item_prediction, lihat §30), part_type, item_id,
-  host_serial_code (serial code fisik part, sama seperti item_prediction - §35),
-  cycle_id,
+  item_prediction, lihat §30),
+  item_id NOT NULL   -- DIPERTAHANKAN sengaja (§40) - satu-satunya nilai
+                      -- stabil lintas perbaikan, dibutuhkan
+                      -- open_alerts_by_item() supaya tetap bisa menemukan
+                      -- alert OPEN suatu item walau host_serial_code-nya
+                      -- sudah berubah sejak alert dibuka.
+  host_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id),
   inspection_seq (seq yang AKAN dipakai inspection yang menyelesaikan alert ini),
   prediction_id -> item_prediction (nullable, UNIQUE - §32),
   opened_at, opened_score, status (OPEN/RESOLVED - §33),
-  resolved_at, resolution_reason, suppression_until,
+  resolved_at, suppression_until,   -- resolution_reason DIBUANG §40
   created_at, updated_at
-  partial UNIQUE(item_id, cycle_id, inspection_seq) WHERE status='OPEN'
+  partial UNIQUE(item_id, host_serial_code, inspection_seq) WHERE status='OPEN'
   - satu episode tidak boleh punya lebih dari satu alert OPEN.
 ```
 
 Sengaja TIDAK ADA tabel `alert_event` (event-sourcing audit log terpisah) -
 SUPERSEDED §28, dibuang karena tidak ada kode yang membacanya (murni
 ditulis) dan informasinya sudah lengkap di kolom `alert.opened_at`/
-`resolved_at`/`resolution_reason`.
+`resolved_at`/`status` (`resolution_reason` sendiri sudah dibuang §40 -
+detail kenapa/gimana alert ditutup tidak lagi disimpan, cukup tahu
+`status=RESOLVED`).
 
 ### Cycle - dibaca langsung dari data operasional, TIDAK ADA tabel mirror (§30)
 
 SEBELUM §30 ada tabel `predictive.item_cycle` yang menyalin riwayat cycle
 dari data operasional ke schema `predictive` (idempotent upsert). Tabel itu
 **dihapus** - `predictive/cycles.py::ensure_active_cycle(item_id)`/
-`cycle_status(item_id, cycle_id)` sekarang membaca `core.data_reader.
+`cycle_status(item_id, host_serial_code)` sekarang membaca `core.data_reader.
 get_cycles()` LANGSUNG tiap dibutuhkan, tanpa menyalin apa pun. Alasannya:
 volume operasi alert kecil (~1/bulan) sehingga query berulang bukan
 masalah performa, dan satu-satunya alasan tabel mirror itu ada sebelumnya
@@ -107,11 +116,22 @@ read-only, tidak bisa dikunci) sudah tergantikan Postgres **advisory
 lock** (`cycles.py::lock_item()`, `pg_advisory_xact_lock(hashtext(item_id))`)
 yang tidak butuh baris/tabel sama sekali.
 
-Konsekuensi: `inspection.cycle_id`/`alert.cycle_id` sekarang TEXT biasa
-(format `"<item_id>:<urutan>"`, reuse `installation_cycle_id` operasional
-apa adanya - TIDAK berubah), bukan lagi FK ke tabel lokal - integritasnya
-dijamin oleh kode (selalu diisi dari `ensure_active_cycle()`), bukan
-constraint database.
+Konsekuensi: `inspection.host_serial_code`/`alert.host_serial_code`
+(dulu kolom terpisah `cycle_id`, digabung §38/§40) sekarang TEXT biasa,
+bukan lagi FK ke tabel lokal - integritasnya dijamin oleh kode (selalu
+diisi dari `ensure_active_cycle()`), bukan constraint database.
+
+**Identitas cycle = `host_serial_code`** (§38, sejak 2026-09-04) - BUKAN
+lagi `"<item_id>:<urutan>"`. `get_cycles()` tetap menghitung
+`installation_cycle_id` internal (dipakai UTUH oleh feature engineering/
+training - `core/features.py`, `engines/failure/gate.py` - TIDAK
+disentuh sama sekali oleh perubahan ini), tapi `predictive/cycles.py`
+sekarang membaca kolom `host_serial_code_clean` (ditambahkan ke output
+`get_cycles()`) sebagai identitas cycle yang dipakai locking/alert/
+inspection - divalidasi 100% populated pada event INSTALLED dan 99,986%
+selaras dengan cycle_id internal (2 dari 13.857 cycle aktif berbeda,
+keduanya kasus dua event INSTALLED tercatat pada timestamp identik -
+lihat docs/DECISIONS.md §38 untuk detail validasi).
 
 `RIGHT_CENSORED_AT_DATA_END` (artinya "belum ada event penutup sampai batas
 data operasional terakhir", BUKAN penutupan fisik) - kalau itu
@@ -141,7 +161,7 @@ tidak bisa saling tabrak nomor urut.
   `auto_resolve_closed_cycles()` (di bawah) menyapu alert OPEN yang basi
   sebelum membuka alert baru. Lalu per PART yang `gate_flagged`: baca cycle
   aktif -> lewati kalau sudah ada alert OPEN untuk episode yang sama
-  (`item_id`+`cycle_id`+`inspection_seq` berikutnya) -> lewati kalau masih
+  (`item_id`+`host_serial_code`+`inspection_seq` berikutnya) -> lewati kalau masih
   dalam masa suppression (KECUALI emergency override) -> INSERT alert.
 - `open_alerts_by_item()` - MURNI BACA, dipakai `auto_resolve_closed_cycles()`
   dan `resolve_by_item()` (§28/§29) untuk mencari alert OPEN milik satu/
@@ -154,8 +174,7 @@ tidak bisa saling tabrak nomor urut.
   dsb - tercatat sistem lewat `journal`, ditutup jadi `cycle_end_reason`
   oleh §20). Untuk tiap alert OPEN, baca status cycle-nya LANGSUNG dari data
   operasional (`cycles.py::cycle_status()`, §30); kalau cycle sudah
-  tertutup, UPDATE langsung ke RESOLVED dengan `resolution_reason=f"
-  OPERATIONAL_CYCLE_CLOSED:{end_reason}"` - TANPA inspection row, TANPA
+  tertutup, UPDATE langsung ke RESOLVED - TANPA inspection row, TANPA
   panggilan API. Tidak menyentuh alert yang cycle-nya masih aktif. Dipanggil
   dari DUA jalur (§34): `evaluate_and_open()` (nebeng siklus scoring
   bulanan) DAN `python -m partrisk.cli resolve-closed-alerts` (murah,
@@ -181,7 +200,7 @@ tidak bisa saling tabrak nomor urut.
   `AlertCycleMismatch` mentah) supaya caller tahu alert sudah selesai,
   bukan error yang tidak jelas maknanya.
 
-**Identitas alert** = `(item_id, cycle_id, inspection_seq)`, BUKAN cuma
+**Identitas alert** = `(item_id, host_serial_code, inspection_seq)`, BUKAN cuma
 `item_id` (docs §16). `inspection_seq` pada alert SAMA DENGAN seq yang
 akan didapat inspection yang menyelesaikannya - invariant ini yang
 membuat re-alert otomatis jadi ALERT_ID BARU (episode inspection_seq
