@@ -2324,3 +2324,688 @@ ke DB live.
 akhir sesi) + `pytest -q` penuh.
 
 ---
+
+## 42 · Kalibrasi cross-fitted - threshold gerbang tidak lagi dipilih dari prediksi in-sample kalibrator (MODEL_TUNING.md A1)
+
+**Status**: berlaku, 2026-09-04. FASE 3.1 dari audit eksternal (`AUDIT_OM.md`
+C18, `MODEL_TUNING.md` A1) - permintaan eksplisit user, dokumen audit
+disediakan langsung (bukan file di repo).
+
+**Masalah (diverifikasi nyata, bukan cuma klaim dokumen)**: di
+`train.py::main()`, `calibrator` (isotonic) di-fit di VALIDATION
+(`train_model()`), lalu skor VALIDATION yang dipakai memilih threshold
+gerbang (`compute_gate()`) dihasilkan dari kalibrator YANG SAMA memprediksi
+baris YANG SAMA yang dipakai fit-nya. Isotonic regression bebas overfit ke
+titik langka - dibuktikan lewat threshold produksi yang berbentuk rasio
+bilangan bulat kecil (`0,47619 = 10/21` untuk v6) alih-alih angka riil,
+tanda tangan rata-rata bin isotonic yang di-fit ke segelintir titik positif.
+
+**Perbaikan**: `train.py::cross_fitted_calibration(raw, y, n_splits=5)` -
+StratifiedKFold 5-fold: skor OUT-OF-FOLD (kalibrator fold TIDAK PERNAH
+melihat baris yang sedang diprediksi) dipakai KHUSUS untuk seleksi
+threshold; kalibrator FINAL (dipakai deploy/serving/TEST) tetap di-fit
+pada SELURUH VALIDATION seperti sebelumnya - tidak ada yang berubah dari
+sisi kalibrator yang benar-benar dipakai `predict.py`/`batch.py`.
+
+**Yang diubah presisi**: `train_model()`'s return berubah dari
+`(model, calibrator, metrics, raw_test)` jadi `(model, calibrator, metrics,
+raw_test, val_calibrated_out_of_fold)` - dua caller (`train.py::main()`,
+`cli.py::_precision_gate_experiment_main()`) disesuaikan. Di `main()`,
+INPUT `compute_gate()` diganti dari `validation_calibrated` (in-sample)
+jadi `validation_calibrated_out_of_fold` (dihitung ULANG dari
+`validation_raw` yang memakai dukungan BEKU - bukan langsung reuse
+`train_model()`'s versi internal yang memakai dukungan point-in-time,
+karena keduanya sengaja beda basis dukungan sejak sebelum perbaikan ini).
+Metrik pelaporan (`validation_candidate_metrics`, `decide_promotion()`)
+TIDAK disentuh - `pr_auc`/`recall_at_capacity` yang dipakai keputusan
+promosi sudah dihitung dari skor RAW (bukan calibrated), jadi tidak
+terpengaruh leakage kalibrasi sama sekali.
+
+**Diketahui TIDAK diikutkan** (di luar scope 3.1, dilaporkan sebagai
+catatan): `cli.py::_gate_candidate_from_model()` (dipakai
+`precision-gate-experiment`) punya pola leakage yang SAMA persis
+(`calibrator.predict()` pada baris yang sama dipakai fit) - TIDAK diperbaiki
+karena bukan bagian dari alur training/gate PRODUKSI, murni tool riset
+terpisah yang tidak disebut eksplisit di 3.1-3.10.
+
+**Test** (`tests/test_pipeline.py`, tanpa DB/model - murni unit, numpy):
+titik positif ekstrem tunggal di ujung skor tinggi dibuktikan dipetakan
+kalibrator in-sample ke ~1,0 (overfitting, diverifikasi >0,9) tapi
+out-of-fold jauh lebih rendah (<0,5, selisih >0,3) - dites empiris dulu
+lewat script ad-hoc sebelum dituliskan sebagai assertion tetap. Plus test
+kalibrator final tetap identik dengan fit-langsung-semua-data, dan setiap
+baris dapat tepat satu prediksi out-of-fold.
+
+**Verifikasi**: `ruff check` nol pelanggaran BARU (baseline 52 di
+`train.py`+`cli.py`, tetap 52 setelah perbaikan satu E501 yang sempat
+muncul dari baris unpacking; `test_pipeline.py` tetap 17). `pytest -q`
+penuh.
+
+## 43 · Threshold gerbang: batas bawah Clopper-Pearson + min_alerts, bukan presisi titik-estimasi (MODEL_TUNING.md A2)
+
+**Status**: berlaku, 2026-09-05. FASE 3.2 dari audit eksternal
+(`AUDIT_OM.md` C2, `MODEL_TUNING.md` A2) - lanjutan §42.
+
+**Masalah (diverifikasi nyata lewat simulasi, bukan cuma klaim dokumen)**:
+`gate.select_precision_constrained_threshold()` memilih threshold dengan
+recall terbesar yang presisi TITIK-ESTIMASI-nya >= target, tanpa syarat
+jumlah alert minimum. Pada sampel kecil ini rentan winner's curse -
+dibuktikan lewat skenario buatan (9 dari 200 baris positif, tersebar
+supaya recall jenuh pelan-pelan): aturan lama menganggap FEASIBLE sebuah
+threshold dengan cuma 22 alert, presisi titik-estimasi 0,4091 (>= target
+0,40) - padahal batas bawah Clopper-Pearson 95% pada 9/22 cuma 0,2327,
+jauh dari 0,40. Match persis dengan pola v6 production (`10/21 = 0,4762`,
+rasio bilangan bulat kecil dari §42) yang jadi gejala
+awal masalah ini.
+
+**Perbaikan**: `gate.py` dapat dua fungsi baru:
+- `precision_lower_bound(true_positive, alerts, confidence=0.95)` - batas
+  bawah Clopper-Pearson lewat `scipy.stats.beta.ppf(1-confidence, tp, n-tp+1)`.
+- `select_threshold(scores, labels, target_precision, min_alerts=30,
+  confidence=0.95)` - threshold dengan cakupan/recall TERBESAR yang
+  memenuhi DUA syarat: batas bawah presisi >= target_precision DAN
+  alert >= min_alerts. Skor bernilai sama (umum pada keluaran isotonic
+  yang bertangga, §42/MODEL_TUNING B2) digabung jadi satu
+  threshold kandidat lewat deteksi batas tie pada array terurut - supaya
+  jumlah alert yang dilaporkan PERSIS sama dengan
+  `(scores >= threshold).sum()` yang sesungguhnya dipakai serving
+  (diverifikasi lewat test tie eksplisit, lihat di bawah).
+
+`config.py` dapat konstanta baru `FAILURE_GATE_MIN_ALERTS = 30`.
+`train.py::compute_gate()` diganti dari memanggil
+`gate.select_precision_constrained_threshold(calibrated_val, target_val,
+target_precision)` jadi `gate.select_threshold(calibrated_val, target_val,
+target_precision, min_alerts=min_alerts)` - parameter baru `min_alerts`
+ditambahkan ke signature `compute_gate()` dengan default
+`config.FAILURE_GATE_MIN_ALERTS`, jadi kedua caller yang ada
+(`train.py::main()`, `cli.py::_attach_gate_main()`) tidak perlu diubah
+(dipakai lewat default keyword). `result["validation_metrics"]` di
+`compute_gate()` dapat field baru `precision_lower_bound`; `result` dapat
+field baru `min_alerts` untuk transparansi di `metadata.json`.
+
+**Diketahui TIDAK diikutkan** (di luar scope 3.2, dilaporkan sebagai
+catatan, sama seperti pola §42):
+- `gate.select_precision_constrained_threshold()` (titik-estimasi, fungsi
+  LAMA) TIDAK dihapus - masih dipakai `cli.py::_precision_gate_experiment_main()`
+  (tool riset `precision-gate-experiment`), murni di luar alur
+  training/gate PRODUKSI.
+- `gate.select_lifecycle_threshold()` (seleksi threshold di tingkat
+  LIFECYCLE/cycle, dipakai `compute_gate()`'s blok `lifecycle` opsional
+  dan `cli.py`'s `lifecycle-gate-experiment`) TIDAK diubah - punya pola
+  winner's-curse yang sama secara statistik, tapi `min_alerts=30` secara
+  konsep milik hitungan ALERT per baris, bukan `promoted_cycles`; 3.2
+  cuma menyebut "min_alerts" secara eksplisit, jadi diperlakukan sebagai
+  temuan terpisah, bukan bagian dari perbaikan ini.
+
+**Test** (`tests/test_gate.py`, murni unit, numpy - tanpa DB/model):
+skenario winner's-curse di atas dibuktikan dulu bikin aturan LAMA bilang
+feasible dengan <30 alert (prasyarat di-assert eksplisit), lalu dibuktikan
+aturan BARU menolaknya (`feasible=False`). Plus: `precision_lower_bound`
+nol tanpa true positive, batas bawah terbukti jauh di bawah titik-estimasi
+pada sampel kecil, threshold hasil `select_threshold` pada data ber-ties
+terbukti mereproduksi jumlah alert dan true positive yang PERSIS sama
+lewat `(scores >= threshold)`, kasus tanpa label positif, dan cakupan
+lebih besar pada target presisi lebih longgar (paralel test lama untuk
+`select_precision_constrained_threshold`).
+
+**Verifikasi**: `ruff check` pada `gate.py`+`train.py`+`config.py`+
+`test_gate.py` - baseline 12 pelanggaran (pra-ada), tetap 12 setelah
+perubahan (nol baru). `pytest tests/test_gate.py -q` - 19 passed (13 lama
++ 6 baru). `pytest -q` penuh - exit code 0.
+
+**Dampak nyata pada model production (`v6`), diukur langsung terhadap
+DB+model asli, bukan simulasi**: pada `FAILURE_GATE_TARGET_PRECISION=0,40`
+(nilai lama), aturan LAMA (titik-estimasi) bilang feasible - threshold
+0,4762 (persis rasio `10/21` yang dicurigai §42), VALIDATION 25 alert
+presisi 0,52 recall 1,51%, TEST (threshold beku) cuma 4 alert presisi
+0,50 recall 0,19% - nyaris tidak berguna. Aturan BARU pada target yang
+SAMA (0,40) bilang **infeasible** - batas bawah tertinggi yang bisa
+dicapai cuma 0,3414 pada 25 alert, tidak pernah menyentuh 0,40 secara
+robust. Ini BUKAN regresi - ini pengungkapan bahwa klaim presisi 0,40
+lama itu sendiri tidak pernah valid secara statistik. Konsekuensinya
+dibereskan di §44 (penurunan target_precision).
+
+## 44 · `FAILURE_GATE_TARGET_PRECISION` diturunkan 0,40 -> 0,20 - KEPUTUSAN biaya-inspeksi, BUKAN perbaikan model (MODEL_TUNING.md A3)
+
+**Status**: berlaku, 2026-09-05. FASE 3.3 dari audit eksternal
+(`AUDIT_OM.md` C2, `MODEL_TUNING.md` A3) - lanjutan §43. **Ini
+KEPUTUSAN TRADE-OFF bisnis (menerima lebih banyak inspeksi terbuang demi
+cakupan lebih besar), BUKAN model yang membaik** - dicatat eksplisit
+sesuai permintaan user supaya laporan angka akhir FASE 3 tidak
+mencampur "presisi/recall naik karena model lebih baik" dengan "naik
+karena target diturunkan".
+
+**Kenapa harus diputuskan ulang sekarang**: §43 membuktikan target lama
+(0,40) sudah TIDAK PERNAH bisa dicapai secara robust begitu diukur jujur
+lewat batas bawah Clopper-Pearson - gerbang jadi permanen infeasible
+(nol alert) pada model `v6` kalau target dibiarkan 0,40. Mengembalikan
+gerbang ke keadaan berguna MENGHARUSKAN memilih target baru, bukan
+opsional.
+
+**Sweep nyata** (model `v6` CURRENT, `gate.select_threshold()`,
+`min_alerts=30`, diukur langsung terhadap DB+model - bukan simulasi):
+
+| target | feasible | alert VALIDATION | presisi VALIDATION (batas bawah) | recall VALIDATION | alert TEST | presisi TEST | recall TEST |
+|---:|:---:|---:|---|---:|---:|---:|---:|
+| 0,10 | ya | 2459 | 0,1159 (0,1054) | 33,14% | 1965 | 0,2265 | 41,98% |
+| 0,15 | ya | 914 | 0,1783 (0,1578) | 18,95% | 948 | 0,3249 | 29,06% |
+| **0,20** | **ya** | **382** | **0,2356 (0,2002)** | **10,47%** | **401** | **0,4289** | **16,23%** |
+| 0,25 | ya | 90 | 0,3667 (0,2819) | 3,84% | 70 | 0,5000 | 3,30% |
+| 0,30 - 0,40 | **tidak** | - | - | - | - | - | - |
+
+Base rate kerusakan pada populasi layak (`366.965` baris, `5.919`
+kerusakan) = ~1,6% - presisi TEST 0,4289 pada target 0,20 masih ~27x
+lift di atas acak.
+
+**Keputusan**: `config.FAILURE_GATE_TARGET_PRECISION = 0,20` (dipilih
+user secara eksplisit dari 3 opsi bertanda dalam kisaran 0,20-0,25 yang
+disarankan `MODEL_TUNING.md` A3, ditambah opsi nilai bebas - lihat sweep
+di atas). Alasan biaya-inspeksi: 0,25 nyaris tidak menambah cakupan
+dibanding gerbang lama yang rusak (70-90 alert, mirip 4 alert lama) -
+gagal memenuhi tujuan eksplisit FASE 3 ("gerbang mengeluarkan lebih
+banyak flag"). 0,15/0,10 memberi recall lebih tinggi tapi >2/3 inspeksi
+terbuang. 0,20 adalah target TERTINGGI dalam kisaran yang disarankan
+yang masih memberi volume alert yang wajar dipakai (382-401), presisi
+TEST 0,4289 (kurang dari 6 dari 10 inspeksi terbuang).
+
+**Yang TIDAK berubah - PR-AUC**: `average_precision_score` pada skor RAW
+(sebelum kalibrasi/gerbang) - VALIDATION 0,1155, TEST 0,2183 - SAMA
+PERSIS sebelum dan sesudah §42/§43/§44, karena ketiganya cuma mengubah
+kalibrasi dan seleksi threshold, bukan model/fitur. Kalau PR-AUC nanti
+naik (3.5 hyperparameter, 3.6 class-weight, 3.7-3.8 fitur baru), itu
+baru genuinely peningkatan model - HARUS dilaporkan terpisah dari
+kenaikan alert/recall akibat keputusan target di sini.
+
+**Verifikasi**: perubahan murni konstanta konfigurasi + dokumentasi;
+tidak ada test yang meng-hardcode nilai lama (`grep
+FAILURE_GATE_TARGET_PRECISION tests/` kosong). `pytest -q` penuh - exit
+code 0 (tidak ada test yang bergantung pada nilai lama).
+
+## 45 · Antrian kerja dua tingkat: CONFIRMED vs RANKED - RANKED tidak pernah membuka alert (MODEL_TUNING.md A4)
+
+**Status**: berlaku, 2026-09-05. FASE 3.4 dari audit eksternal
+(`AUDIT_OM.md`, `MODEL_TUNING.md` A4) - lanjutan §43/§44.
+
+**Konteks**: sebelum ini, `alerts.py::evaluate_and_open()` membuka alert
+untuk SEMUA baris `gate_flagged=True` tanpa batas jumlah - tidak ada
+konsep kapasitas di jalur pembukaan alert produksi sama sekali
+(`FAILURE_CAPACITY_PER_MONTH` sebelumnya cuma dipakai
+`capacity_metrics()`/`decide_promotion()` untuk PERBANDINGAN model saat
+training, bukan membatasi/mengisi antrian kerja produksi).
+
+**Perbaikan**: `serving/batch.py::build_work_queue(gate_flagged, scores,
+capacity=config.FAILURE_CAPACITY_PER_MONTH) -> np.ndarray` - fungsi murni
+(array numpy in-out, mengikuti gaya `gate.py`, mudah diuji tanpa
+DB/pandas) yang memberi tiap baris salah satu dari tiga nilai:
+- `"CONFIRMED"` - `gate_flagged=True`, TIDAK PERNAH dipotong oleh
+  kapasitas (kapasitas bukan plafon buat CONFIRMED).
+- `"RANKED"` - mengisi SISA kapasitas (`capacity - jumlah_confirmed`)
+  dari skor tertinggi DI ANTARA yang `gate_flagged=False` - TIDAK ada
+  klaim presisi apa pun untuk tier ini.
+- `None` - di luar CONFIRMED maupun RANKED, tidak masuk antrian kerja.
+
+Dipanggil dari `_compute()` di `batch.py`, menambahkan kolom
+`work_queue_tier` ke frame in-memory yang dipakai `score-and-persist`
+(bukan kolom DB baru - lihat "Diketahui TIDAK diikutkan" di bawah).
+`alerts.py::evaluate_and_open()` diubah dari memfilter
+`frame["gate_flagged"]` langsung jadi memfilter
+`frame["work_queue_tier"] == "CONFIRMED"` - secara perilaku IDENTIK hari
+ini (CONFIRMED ⟺ gate_flagged secara konstruksi), tapi sekarang invarian
+"RANKED tidak pernah jadi alert" ditegakkan EKSPLISIT di titik penulisan
+DB, bukan cuma kebetulan lewat nama kolom `gate_flagged`.
+
+**Diketahui TIDAK diikutkan** (dipertimbangkan, sengaja tidak dilakukan):
+tidak menambah kolom `work_queue_tier` ke `predictive.item_prediction`
+(DB) - saat ini TIDAK ADA konsumen (endpoint API/UI) yang membaca
+histori tier RANKED, dan `gate_flagged` (BOOLEAN, sudah persisten) sudah
+cukup merekonstruksi CONFIRMED-nya. Menambah kolom DB tanpa konsumen
+adalah fitur di luar yang diminta (CLAUDE.md §2) - direvisit kalau nanti
+ada endpoint/laporan yang butuh histori RANKED.
+
+**Test**: `tests/test_batch.py` (murni unit, numpy - tanpa DB/model):
+CONFIRMED selalu masuk terlepas dari kapasitas, RANKED mengisi sisa
+kapasitas dari skor TERTINGGI (bukan urutan baris), nol RANKED kalau
+CONFIRMED sudah penuhi/lampaui kapasitas, kapasitas 0 tidak menghasilkan
+RANKED, dan kasus tanpa CONFIRMED sama sekali. `tests/test_predictive.py`
+(`@needs_database @needs_models`): baris ber-tier RANKED (skor tinggi,
+0,9) terbukti TIDAK membuka alert lewat `evaluate_and_open()` - test
+baru `test_evaluate_and_open_tidak_membuka_alert_untuk_tier_ranked`.
+Helper `_flagged_frame()` disesuaikan menambahkan `work_queue_tier:
+"CONFIRMED"` supaya test lama yang sudah ada tetap mencerminkan kontrak
+baru (bukan lewat kebetulan `gate_flagged` yang tidak lagi jadi filter
+langsung).
+
+**Verifikasi**: `ruff check` pada `batch.py`+`alerts.py`+`test_batch.py`+
+`test_predictive.py` - baseline 22 pelanggaran (pra-ada), tetap 22
+setelah perubahan (nol baru). `pytest tests/test_batch.py -q` - 10
+passed (5 lama + 5 baru), termasuk test DB baru
+`test_evaluate_and_open_tidak_membuka_alert_untuk_tier_ranked`. `pytest
+-q` penuh (termasuk test ber-DB) - exit code 0.
+
+## 46 · `CATBOOST_PARAMS`: early stopping diperbaiki (eval_set tidak lagi terbuang), thread_count semua CPU - NEUTRAL pada metrik, perbaikan kebenaran bukan performa (MODEL_TUNING.md B1)
+
+**Status**: berlaku, 2026-09-05. FASE 3.5 dari audit eksternal
+(`AUDIT_OM.md` B1, `MODEL_TUNING.md` B1). **Angka TIDAK membaik secara
+signifikan - dicatat eksplisit sesuai instruksi user supaya tidak
+tercampur dengan perbaikan model yang genuinely lebih baik.**
+
+**Masalah nyata di konfigurasi lama**: `use_best_model: False` dipakai
+BERSAMA `model.fit(..., eval_set=Pool(val_x, val_y, ...))` - kombinasi
+ini membuat `eval_set` DIKIRIM tapi TIDAK PERNAH dipakai untuk apa pun
+(tidak ada early stopping, tidak ada pemilihan iterasi terbaik) - CatBoost
+diam-diam mengabaikannya. `thread_count: 1` membatasi training ke SATU
+core CPU tanpa alasan yang tercatat di mana pun.
+
+**Perubahan** (`config.CATBOOST_PARAMS`):
+
+| parameter | lama | baru |
+|---|---|---|
+| iterations | 200 | 3000 |
+| depth | 4 | 6 |
+| eval_metric | AUC | PRAUC |
+| use_best_model | False | True |
+| od_type | (tidak ada) | Iter |
+| od_wait | (tidak ada) | 200 |
+| thread_count | 1 | -1 (semua core) |
+
+`use_best_model=True` + `od_type=Iter` + `od_wait=200` membuat
+`eval_set` yang SUDAH DIKIRIM sejak awal akhirnya benar-benar dipakai -
+training berhenti kalau `PRAUC` VALIDATION tidak membaik 200 iterasi
+berturut-turut, dan model yang disimpan adalah iterasi TERBAIK di
+VALIDATION (bukan iterasi terakhir sembarang). `iterations=3000` cuma
+plafon atas - early stopping yang menentukan berapa iterasi sungguhan
+dipakai. `eval_metric=PRAUC` menyelaraskan objektif optimasi CatBoost
+dengan `average_precision_score` yang dipakai mengukur/membandingkan
+model di `full_metrics()` (sebelumnya `AUC`, metrik berbeda dari yang
+dipakai keputusan promosi).
+
+**Verifikasi empiris (WAJIB sebelum menerapkan)**: `rolling-lifecycle-backtest`-style
+6-fold (fitur v4 CURRENT, `cli._fit_and_evaluate_fold`) membandingkan
+LAMA vs BARU secara berpasangan per-fold:
+
+| metrik | LAMA | BARU | selisih | signifikan? |
+|---|---|---|---|---|
+| ROC-AUC | 0,7980 ± 0,0431 | 0,8002 ± 0,0459 | +0,0022 | TIDAK (dalam 1 sd) |
+| PR-AUC | 0,1766 ± 0,1536 | 0,1727 ± 0,1471 | -0,0039 | TIDAK (dalam 1 sd) |
+| Brier terkalibrasi | 0,0295 ± 0,0172 | 0,0297 ± 0,0176 | +0,0002 | TIDAK (dalam 1 sd) |
+| Precision@kapasitas | 0,2025 ± 0,1746 | 0,1946 ± 0,1619 | -0,0079 | TIDAK (dalam 1 sd) |
+| Recall@kapasitas | 0,3060 ± 0,1196 | 0,2971 ± 0,1050 | -0,0090 | TIDAK (dalam 1 sd) |
+
+Semua selisih berada DALAM 1 sd - TIDAK ADA klaim model membaik dari
+perubahan ini. Konsisten dengan eksperimen tuning hyperparameter
+sebelumnya di sesi yang sama (juga tidak menemukan perbaikan stabil
+lewat rolling-fold validation).
+
+**Kenapa tetap diterapkan** (keputusan eksplisit user setelah data
+neutral ditunjukkan, BUKAN klaim performa): (1) `eval_set` yang sudah
+dikirim sejak awal sekarang benar-benar dipakai - `use_best_model=False`
+sebelumnya membuatnya jadi kode mati/menyesatkan pembaca; (2)
+`thread_count=-1` murni percepatan training (pakai semua core), tidak
+berdampak ke hasil (dibuktikan lewat Brier/PR-AUC yang identik dalam
+margin noise); (3) tidak ada regresi - semua selisih dalam margin noise,
+bukan memburuk secara signifikan. **Konsekuensi operasional**: retrain
+produksi jadi lebih lambat per proses (plafon 3000 iterasi vs 200 lama,
+walau early stopping kemungkinan berhenti jauh lebih awal) - belum diukur
+durasi riil training production dengan konfigurasi baru.
+
+**Verifikasi**: tidak ada test yang meng-hardcode nilai
+`CATBOOST_PARAMS` lama (`grep CATBOOST_PARAMS tests/` kosong). `pytest -q`
+penuh (melatih ulang model di test yang butuh DB+model, `iterations=3000`
++ early stopping) - exit code 0.
+
+## 47 · Eksperimen `auto_class_weights` - TIDAK diganti, null result (MODEL_TUNING.md B2)
+
+**Status**: ditutup TANPA perubahan kode, 2026-09-05. FASE 3.6 dari
+audit eksternal (`AUDIT_OM.md` B2, `MODEL_TUNING.md` B2) - lanjutan §46.
+**Ini catatan eksperimen yang TIDAK menghasilkan perbaikan - dicatat
+sesuai instruksi eksplisit user supaya null result juga terdokumentasi,
+bukan cuma yang berhasil.**
+
+**Klaim audit**: `auto_class_weights="Balanced"` menaikkan bobot kelas
+positif ~40x, memaksa isotonic melakukan "8x correction work" (brier_raw
+0,246 vs brier_calibrated 0,029), dan diduga menghasilkan tangga
+isotonic yang KASAR (sedikit bin unik) - penyebab threshold gerbang
+lama jatuh ke rasio bilangan bulat kecil (`10/21` di §42/§43).
+
+**Perbandingan nyata** (satu split TRAIN/VALIDATION/TEST produksi
+sungguhan - fitur v4 CURRENT, hyperparameter §46 dipertahankan tetap,
+cuma `auto_class_weights`+`eval_metric` yang divariasikan):
+
+| varian | TEST PR-AUC | TEST ROC-AUC | brier_raw | brier_calibrated | bin isotonic unik |
+|---|---:|---:|---:|---:|---:|
+| **Balanced+AUC (saat ini)** | 0,2276 | 0,8082 | 0,2414 | 0,0288 | 28 |
+| None+PRAUC | 0,2236 | 0,8033 | 0,0286 | 0,0290 | 28 |
+| SqrtBalanced+PRAUC | 0,2200 | 0,8198 | 0,0563 | 0,0292 | 26 |
+
+**Bagian klaim audit yang TERKONFIRMASI**: brier_raw `Balanced` (0,2414)
+~8,4x lebih buruk dari `None` (0,0286) - persis skala yang disebut
+audit. `auto_class_weights="Balanced"` sungguh mendistorsi skala
+probabilitas mentah sebelum kalibrasi.
+
+**Bagian klaim audit yang TIDAK TERKONFIRMASI**: jumlah bin isotonic
+unik HAMPIR SAMA di ketiganya (28 vs 28 vs 26) - distorsi raw score
+`Balanced` TIDAK terbukti menghasilkan tangga isotonic yang lebih kasar
+pada data nyata ini. Hipotesis sebab-akibat audit (distorsi raw -> bin
+kasar -> threshold rasio kecil) cuma separuh benar.
+
+**Keputusan: TIDAK mengganti `auto_class_weights`**. Pada metrik yang
+sungguh dipakai gerbang (brier TERKALIBRASI, PR-AUC TEST), ketiga varian
+berada dalam margin noise satu sama lain (0,0288/0,0290/0,0292 brier;
+0,2276/0,2236/0,2200 PR-AUC) - TIDAK ADA satu split ini punya replikasi
+fold untuk klaim signifikansi, dan VALIDATION vs TEST tidak sepakat
+varian mana yang "menang". Tidak ada metrik gerbang yang membaik dari
+berpindah, sementara berpindah akan memaksa sweep target_precision §44
+diulang (distribusi skor berubah). Diagnostik brier_raw dicatat sebagai
+temuan menarik, bukan alasan mengubah konfigurasi produksi.
+
+**Verifikasi**: tidak ada perubahan kode - `config.CATBOOST_PARAMS`
+tetap seperti §46 (`auto_class_weights="Balanced"`, `eval_metric="PRAUC"`
+dari perbaikan early-stopping §46, BUKAN "Balanced+AUC" yang jadi baseline
+pembanding di eksperimen ini). Tidak ada test yang perlu diubah.
+
+## 48 · Eksperimen fitur kepadatan terminal (FASE 3.7) - DITOLAK, MERUGIKAN performa nyata (MODEL_TUNING.md C1, klaim "DAMPAK TERBESAR")
+
+**Status**: ditutup, KODE DIKEMBALIKAN seperti semula, 2026-09-05. FASE 3.7
+dari audit eksternal (`AUDIT_OM.md`/`MODEL_TUNING.md` C1) - lanjutan §47.
+**Klaim audit menyebut ini "DAMPAK TERBESAR" - hasil validasi nyata
+membuktikan SEBALIKNYA. Dicatat sesuai instruksi eksplisit user supaya
+temuan negatif juga terdokumentasi, bukan cuma yang berhasil.**
+
+**Klaim audit**: `batch.py` sudah membaca `get_terminal_context()` (relasi
+part ke terminal/perangkat induk) tapi cuma untuk label tampilan - graf
+parent-child ini belum pernah diubah jadi FITUR model. Diusulkan 4 fitur:
+sibling-failures-90d, sibling-failure-rate, part-count-per-terminal,
+days-since-last-terminal-failure - dengan PERINGATAN eksplisit: kegagalan
+milik PART ITU SENDIRI wajib dikeluarkan dari hitungan terminal, kalau
+tidak leakage.
+
+**Yang dikerjakan (sempat, sebelum ditolak)**: diimplementasikan penuh di
+`features.py` - `_reliable_terminal_by_cycle()` (relasi terpercaya per
+siklus, status sama seperti `batch.py::_attach_terminal()`),
+`_attach_terminal_id()` (item tanpa relasi terpercaya jadi bucket
+TUNGGAL milik dirinya sendiri - bukan bucket "tidak diketahui" bersama,
+supaya tidak ada sibling palsu akibat data hilang), `_terminal_density_columns()`
+(trik "semua dikurangi milik sendiri" - `local_density()` dipanggil dua
+kali, sekali per terminal sekali per komposit terminal+item, lalu
+dikurangkan - MEMAKAI ULANG mesin `local_density()` yang sudah
+chronological-safe), `_terminal_recency_columns()` (hari sejak kegagalan
+SIBLING terakhir, melompati kegagalan milik sendiri lewat loop per
+terminal). 6 unit test murni (tanpa DB) membuktikan SECARA EKSPLISIT
+skenario leakage yang diperingatkan audit BERHASIL DICEGAH - part yang
+gagal lalu dipasang ulang di terminal yang sama terbukti TIDAK menghitung
+kegagalan masa lalunya sendiri sebagai sibling failure, tapi tetap
+menghitung kegagalan sibling sungguhan.
+
+**Validasi nyata (WAJIB sebelum masuk `config.FEATURE_COLUMNS` produksi,
+sesuai kesepakatan sebelum mengerjakan 3.7)**: `rolling-lifecycle-backtest`-
+style 6-fold (fitur v4 CURRENT + 5 kolom kandidat, hyperparameter §46
+dipertahankan tetap) membandingkan BASELINE vs KANDIDAT (+terminal)
+secara berpasangan per-fold:
+
+| metrik | BASELINE | KANDIDAT (+terminal) | selisih | signifikan? |
+|---|---|---|---|---|
+| ROC-AUC | 0,8002 ± 0,0459 | 0,7789 ± 0,0586 | -0,0213 ± 0,0208 | **YA - BASELINE lebih baik** |
+| PR-AUC | 0,1727 ± 0,1471 | 0,1582 ± 0,1534 | -0,0145 ± 0,0225 | tidak (tapi turun di 5/6 fold) |
+| Brier terkalibrasi | 0,0297 ± 0,0176 | 0,0297 ± 0,0173 | +0,0000 | tidak |
+| Precision@kapasitas | 0,1946 ± 0,1627 | 0,1862 ± 0,1627 | -0,0083 | tidak |
+| Recall@kapasitas | 0,2971 ± 0,1050 | 0,2869 ± 0,1170 | -0,0101 | tidak |
+
+ROC-AUC memburuk secara SIGNIFIKAN (melebihi 1 sd selisih per-fold) -
+KANDIDAT lebih buruk di 5 dari 6 fold. Ini BUKAN hasil netral seperti
+§46/§47 - ini regresi nyata.
+
+**Hipotesis "cakupan data jarang" DIPERIKSA dan TERBANTAH**: diduga
+awalnya fitur ini merugikan karena banyak PART tidak punya relasi
+terminal terpercaya (fallback ke bucket tunggal bernilai nol). Diperiksa
+langsung: 366.691 dari 366.965 baris (99,9%) PUNYA relasi terminal
+terpercaya - cakupan data BUKAN masalahnya. Sinyal kepadatan terminal itu
+sendiri tampaknya genuinely tidak prediktif (atau menambah derau) pada
+fleet ini, bukan artefak data hilang.
+
+**Keputusan: KODE DIKEMBALIKAN SEPENUHNYA** (bukan dipertahankan sebagai
+referensi) - pilihan eksplisit user setelah temuan negatif ditunjukkan.
+`features.py` kembali persis seperti sebelum 3.7 (dikonfirmasi `git diff`
+kosong). `config.py`: `TERMINAL_DENSITY_FEATURES`,
+`TERMINAL_DENSITY_WINDOW_DAYS`, `RELIABLE_TERMINAL_LINK_STATUSES`
+dihapus. `batch.py`: `_RELIABLE_TERMINAL_LINK_STATUSES` dikembalikan
+jadi definisi lokal (bukan lagi diimpor dari `config`). `tests/test_features.py`
+dihapus. Satu perbaikan TIDAK terkait 3.7 yang ditemukan di sepanjang
+proses ini TETAP disimpan: `cli.py` baris pemanggilan `train_model()` di
+`_gate_candidate_from_model()`'s caller yang kepanjangan (>100 karakter,
+sisa dari §42 yang belum sempat diperiksa ruff-nya waktu itu) - diperbaiki
+permanen, bukan bagian dari revert ini.
+
+**Verifikasi**: `ruff check src tests` - baseline penuh (HEAD sebelum sesi
+ini) 125 pelanggaran; setelah §42-§48 (termasuk revert 3.7 dan perbaikan
+`cli.py` yang disebut di atas) - 124, artinya BERKURANG satu (perbaikan
+`cli.py`), NOL baru. `pytest -q` penuh - exit code 0, tidak ada sisa test
+`test_features.py` (file sudah dihapus).
+
+## 49 · NaN-collision `days_since_last_corrective` diperbaiki tapi SENGAJA DITUNDA disambungkan - akan merusak prediksi live v6 tanpa retrain (MODEL_TUNING.md C5)
+
+**Status**: fungsi perbaikan SIAP dan TERUJI, TIDAK disambungkan ke
+`build_features()`, 2026-09-05. FASE 3.8 (sebagian - C5) dari audit
+eksternal (`AUDIT_OM.md`/`MODEL_TUNING.md` C5) - lanjutan §48.
+
+**Masalah (diverifikasi nyata)**: `features.py::_log1p()` melakukan
+`fillna(0.0)` SEBELUM `log1p` - jadi `days_since_last_corrective` yang
+NaN ("belum pernah ada corrective sama sekali") dan yang bernilai 0,0
+("corrective terjadi hari ini") SAMA-SAMA menjadi `log1p(0)=0`. Dua
+kondisi yang artinya BERLAWANAN (tidak ada riwayat perbaikan vs riwayat
+sangat baru) tidak bisa dibedakan model dari nilai fitur ini saja.
+
+**Perbaikan yang disiapkan**: `features.py::_log1p_days_since()` -
+`fillna(_NEVER_HAPPENED_DAYS_SENTINEL=9999.0)` menggantikan
+`fillna(0.0)`, sehingga "belum pernah" jadi log1p BESAR (selaras makna
+"sudah sangat lama/tak terbatas"), bukan collide dengan "baru saja".
+Diverifikasi lewat `tests/test_pipeline.py::test_log1p_days_since_belum_pernah_tidak_bertabrakan_dengan_hari_ini`
+(dites langsung ke fungsinya - lihat alasan di bawah kenapa bukan lewat
+`build_features()`).
+
+**Ditemukan SAAT verifikasi (bukan diminta, tapi krusial)**: menyambungkan
+fungsi ini ke `build_features()` langsung mengubah keluaran
+`_score_failure()` untuk MODEL YANG SEDANG DIPRODUKSI (v6) - dibuktikan
+lewat `test_current_batch_matches_golden_baseline` yang tiba-tiba GAGAL:
+3.034-5.127 dari 13.767 PART aktif (22-37% fleet) mendapat
+`failure_probability_*` yang berbeda dari baseline. Ini BUKAN perbaikan
+netral seperti §42-§44 (yang semuanya cuma memengaruhi kalibrasi/gerbang,
+BUKAN skor mentah model) - `build_features()` dipanggil LANGSUNG oleh
+jalur serving live (`batch.py::_score_failure()`) memakai model v6 yang
+DILATIH dengan encoding LAMA (fillna 0,0). Menyalakan encoding baru tanpa
+retrain berarti v6 tiba-tiba menerima nilai fitur yang JAUH di luar
+distribusi yang pernah dilihatnya saat training - prediksi untuk
+sepertiga fleet akan bergeser dan KEMUNGKINAN BESAR MEMBURUK, bukan
+membaik, sampai model baru dilatih.
+
+**Keputusan (eksplisit dari user setelah risiko ditunjukkan)**: TUNDA
+penyambungan. `build_features()` tetap memanggil `_log1p()` yang lama
+untuk `log_days_since_last_corrective` (perilaku live v6 TIDAK berubah,
+`test_current_batch_matches_golden_baseline` tetap hijau). Fungsi
+`_log1p_days_since()` DIPERTAHANKAN di `features.py` (ditandai jelas di
+komentar - jangan dihapus dengan alasan "tidak dipakai") sampai retrain
+GABUNGAN berikutnya yang menyatukan seluruh perubahan FASE 3 yang sudah
+divalidasi (§42, §43, §44, §46, dan fix ini) jadi SATU model baru yang
+benar-benar dilatih dengan encoding yang sudah diperbaiki - baru pada
+saat itu aman disambungkan ke `build_features()`.
+
+**Pelajaran untuk sisa 3.8/3.9/3.10**: setiap perubahan yang menyentuh
+`features.py`/`build_features()` (bukan cuma `config.py`/kalibrasi/gerbang)
+punya risiko yang SAMA - WAJIB dicek dulu terhadap
+`test_current_batch_matches_golden_baseline` sebelum dianggap selesai,
+karena jalur ini satu-satunya sinyal otomatis yang menangkap "kode
+berubah tapi model production belum ikut dilatih ulang".
+
+**Verifikasi**: `ruff check` pada `features.py`+`test_pipeline.py` -
+baseline 26, tetap 26 (nol baru). `pytest tests/test_pipeline.py -q`
+lokal (2 test relevan) - passed. `pytest -q` penuh - exit code 0,
+`test_current_batch_matches_golden_baseline` HIJAU lagi (bukti revert
+bersih, live v6 tidak terdampak).
+
+## 50 · Penulisan artefak model dibuat ATOMIK; `bootstrap-ci` tidak lagi menyentuh metadata.json produksi (FASE 3.10, AUDIT_OM.md C15/C16)
+
+**Status**: berlaku, 2026-09-05. FASE 3.10 dari audit eksternal
+(`AUDIT_OM.md` C15/C16) - dikerjakan sebelum sisa 3.8 (C2-C4/C6) atas
+permintaan eksplisit user (infrastruktur dulu, fitur density belakangan).
+
+**Masalah**: `train.py::CURRENT_POINTER.write_text(version, ...)`,
+`train.py::save_version()`'s tulis `metadata.json`, dan
+`cli.py::_update_metadata_json()` (dipakai `attach-gate`/`bootstrap-ci`)
+semuanya `Path.write_text()` biasa - truncate-lalu-tulis, BUKAN atomik.
+Proses yang mati PERSIS di tengah salah satu tulis ini meninggalkan file
+setengah-tertulis: `CURRENT` kosong/korup bikin `current_version()` gagal
+baca versi produksi; `metadata.json` korup bikin `predict.py` gagal parse
+JSON saat load model - keduanya menjatuhkan SELURUH jalur serving live,
+bukan cuma satu request.
+
+**Perbaikan**: `train.py::atomic_write_text(path, content)` - tulis ke
+file sementara (`tempfile.mkstemp`) di DIREKTORI YANG SAMA (wajib
+filesystem sama untuk `os.replace` atomik), lalu `os.replace()` - file
+lama TETAP UTUH sampai penggantian nama sukses; kalau ADA exception
+kapan pun sebelum itu, file sementara dibersihkan dan file lama tidak
+tersentuh sama sekali. Dipakai di keempat titik: `CURRENT_POINTER`,
+`save_version()`'s metadata.json, dan `cli.py::_update_metadata_json()`
+(otomatis mencakup `attach-gate` dan `bootstrap-ci`, keduanya reuse
+fungsi yang sama).
+
+**Perbaikan kedua (redirect, bukan cuma atomik)**: `bootstrap-ci` TIDAK
+LAGI menulis ke `metadata.json` produksi sama sekali - ditulis ke
+`models/failure/<versi>/analysis/bootstrap_ci.json` (dibuat kalau belum
+ada). Alasan pembedaan dari `attach-gate` (yang TETAP menulis ke
+`metadata.json` produksi): field `gate` yang ditulis `attach-gate` BENAR-
+BENAR DIBACA jalur serving live (`batch.py::_score_failure()`'s
+`metadata.get("gate")`, menentukan `gate_flagged`) - itu backfill data
+produksi yang sah, bukan riset. Field `bootstrap_ci_95` yang ditulis
+`bootstrap-ci` menurut komentar aslinya sendiri "TIDAK disentuh
+scoring" - murni pelaporan/diagnostik, cocok dengan definisi "perkakas
+riset" yang menurut audit tidak boleh menyentuh artefak produksi sama
+sekali.
+
+**Test** (`tests/test_pipeline.py`, murni unit - tanpa DB/model,
+`tempfile.TemporaryDirectory()` dipakai langsung, BUKAN fixture
+`tmp_path` bawaan pytest - lihat catatan lingkungan di bawah):
+`atomic_write_text()` menulis normal terbukti bersih (tidak ada file
+sementara tersisa); simulasi kegagalan PERSIS di `os.replace()` (lewat
+monkeypatch) terbukti TIDAK mengubah isi file lama sama sekali dan tidak
+meninggalkan file sementara.
+
+**Catatan lingkungan (bukan bug kode)**: direktori temp bawaan pytest
+(`%TEMP%\pytest-of-Bimo`) di mesin pengembangan ini TERKUNCI permission
+(`PermissionError` bahkan lewat `takeown`/`icacls`) - kemungkinan dibuat
+sebelumnya oleh proses dengan konteks keamanan berbeda. Test di atas
+sengaja memakai `tempfile.TemporaryDirectory()` langsung (bukan fixture
+`tmp_path`) untuk menghindarinya - bukan perbaikan kode produksi, cuma
+strategi test supaya tidak bergantung pada direktori yang rusak ini.
+Kalau di masa depan test lain butuh `tmp_path` dan gagal dengan error
+serupa, ini penyebabnya - pertimbangkan menghapus/membuat ulang folder
+tsb dengan hak admin.
+
+**Verifikasi**: `ruff check src tests` - 124 sebelum, 124 sesudah (nol
+baru). `pytest -q` penuh - exit code 0.
+
+## 51 · Bootstrap CI model failure diganti jadi SADAR-KLASTER (resample installation_cycle_id, bukan baris) - CI lama TERLALU SEMPIT (AUDIT_OM.md C19)
+
+**Status**: berlaku, 2026-09-05. FASE 3.9 dari audit eksternal
+(`AUDIT_OM.md` C19) - lanjutan §50.
+
+**Masalah**: `cli.py::_bootstrap_classification_ci()` me-resample BARIS
+observasi 30-harian secara i.i.d. (`rng.integers(0, n, size=n)`). Satu
+`installation_cycle_id` (satu siklus pemasangan PART) biasanya menyumbang
+BEBERAPA baris observasi yang berkorelasi kuat (part yang sama, skor
+saling berdekatan dari waktu ke waktu) - resample per-baris memperlakukan
+baris-baris berkorelasi itu seolah independen, membuat interval keyakinan
+(CI 95%) JAUH lebih sempit dari yang sesungguhnya (percaya diri palsu).
+
+**Perbaikan**: `_bootstrap_classification_ci()` sekarang menerima
+parameter `cluster_ids` (diisi `installation_cycle_id`) - tiap replikasi
+bootstrap me-resample ID SIKLUS dengan pengembalian (bukan baris), lalu
+mengambil SEMUA baris milik siklus yang terpilih. Satu siklus yang
+terpilih 2x menyumbang SEMUA barisnya 2x (bukan baris acak yang mungkin
+campur-aduk antar-siklus) - menjaga struktur korelasi dalam-siklus tetap
+utuh di tiap replikasi, sesuai definisi bootstrap berkelompok (cluster
+bootstrap). Satu-satunya caller (`_bootstrap_ci_failure()`) diperbarui
+mengirim `test_dataset["installation_cycle_id"].to_numpy()`.
+
+**Verifikasi empiris (WAJIB sebelum menerapkan)**: skenario buatan (20
+siklus, 50 baris/siklus, SEMUA baris dalam satu siklus berbagi skor+label
+IDENTIK - korelasi sempurna, kasus ekstrem) - CI 95% ROC-AUC resample
+baris i.i.d. lebar 0,0356; resample per-siklus lebar 0,2923 (~8,2x lebih
+lebar). Kasus ekstrem ini sengaja dipakai untuk MEMPERLIHATKAN efeknya
+dengan jelas - data produksi sungguhan kemungkinan tidak sekorelasi ini,
+tapi arah efeknya (CI lama terlalu sempit) sudah pasti benar selama ada
+korelasi dalam-siklus sama sekali (yang secara struktural PASTI ada,
+karena satu siklus = pengamatan berulang PART yang sama).
+
+**Test** (`tests/test_pipeline.py`, murni unit - tanpa DB/model):
+`test_bootstrap_ci_sadar_klaster_lebih_lebar_dari_resample_baris_iid` -
+memakai fungsi produksi yang SAMA, membandingkan `cluster_ids` = ID unik
+per baris (SETARA aturan lama, karena setiap baris jadi "klaster" sendiri
+berisi 1 baris) vs `cluster_ids` = ID siklus sungguhan - CI klaster
+terbukti >2x lebih lebar pada skenario korelasi sempurna di atas.
+
+**Verifikasi**: `ruff check src tests` - 124 sebelum, 123 sesudah (nol
+baru, satu berkurang kebetulan pergeseran baris). `pytest -q` penuh -
+exit code 0.
+
+## 52 · Retrain gabungan (§42/§43/§46/§49) menghasilkan v8 - TIDAK dipromosikan, fix C5 tetap TERTUNDA (permintaan eksplisit user)
+
+**Status**: v8 tersimpan sebagai kandidat, TIDAK production. Fix C5 (§49)
+DICOBA disambungkan lalu DIKEMBALIKAN ke tertunda. 2026-09-05.
+
+**Yang dilakukan**: `_log1p_days_since()` (§49) disambungkan sementara ke
+`build_features()`, lalu `python -m partrisk.engines.failure.train`
+dijalankan TANPA `--force-promote` - menggabungkan seluruh perubahan
+training yang sudah divalidasi sejauh FASE 3 (§42 kalibrasi cross-fitted,
+§43 gerbang Clopper-Pearson, §46 hyperparameter early-stopping, dan fix
+C5) jadi satu model baru, `v8`.
+
+**Hasil nyata** (VALIDATION - dasar keputusan promosi resmi):
+
+| metrik | v8 (kandidat) | v6 (incumbent) |
+|---|---:|---:|
+| PR-AUC | 0,1164 | 0,1157 |
+| ROC-AUC | 0,7777 | 0,7767 |
+| Recall@kapasitas | 0,2988 | **0,3105** |
+| Precision@kapasitas | 0,1154 | 0,1199 |
+| Brier terkalibrasi | 0,0242 | 0,0243 |
+
+PR-AUC menang tipis (+0,0007, dalam margin noise) TAPI Recall@kapasitas
+KALAH (-0,0117) - gerbang dua-syarat (`decide_promotion()`, WAJIB
+menang di KEDUA metrik) menahan promosi dengan benar. TEST (informasi
+saja, tidak memengaruhi keputusan) mengonfirmasi ini bukan kebetulan:
+v8 KALAH di SEMUA metrik (PR-AUC 0,1994 vs 0,2174; recall 0,3566 vs
+0,3849) - v8 genuinely tidak lebih baik dari v6, bukan cuma noise VALIDATION.
+
+**Keputusan: v8 TIDAK dipromosikan** (`models/failure/CURRENT` tetap
+`v6`) - keluaran alami `decide_promotion()`, bukan campur tangan manual.
+v8 tetap tersimpan di `models/failure/v8/` untuk pembanding, sesuai
+perilaku standar `train.py::main()` (tidak dihapus).
+
+**Konsekuensi untuk fix C5 (§49)**: karena v8 TIDAK dipromosikan, v6
+(dilatih dengan encoding LAMA - `fillna(0.0)`) tetap production. Fix C5
+yang sempat disambungkan ke `build_features()` DIKEMBALIKAN ke keadaan
+tertunda (persis seperti §49) - membiarkannya menyala akan
+mereproduksi PERSIS masalah yang sama seperti temuan §49 (prediksi live
+v6 bergeser untuk fleet yang belum pernah ada corrective, tanpa model
+yang sepadan). `_log1p_days_since()` tetap ada di `features.py`, siap
+dipakai retrain berikutnya.
+
+**Kenapa v8 tidak menang** (bukan tentang fix C5 - dianalisis sekilas,
+bukan investigasi mendalam): kombinasi §42+§43+§46 sendiri-sendiri semua
+terbukti netral pada eksperimen SEBELUMNYA (§46 rolling-fold netral,
+kalibrasi §42 tidak memengaruhi skor mentah) - recall@kapasitas yang
+turun kemungkinan besar cuma variansi split TRAIN/VALIDATION/TEST
+tunggal (bukan rolling-fold), konsisten dengan pola "tidak ada yang
+teruji signifikan sejauh ini" di seluruh FASE 3. Investigasi lebih dalam
+(mis. rolling-fold utk v8 vs v6) di luar cakupan sesi ini kecuali diminta.
+
+**Pelajaran**: rencana "satu retrain gabungan pasti mengungkit PR-AUC"
+dari laporan akhir FASE 3 TERBUKTI TERLALU OPTIMISTIK - menggabungkan
+beberapa perubahan netral tidak menjumlah jadi perbaikan; gerbang
+promosi dua-syarat bekerja seperti dirancang untuk mencegah model yang
+tidak genuinely lebih baik naik ke production, bahkan setelah upaya
+signifikan menggabungkan seluruh FASE 3.
+
+**Verifikasi**: `ruff check src tests` setelah revert C5 - 123 (sama
+seperti sebelum retrain, nol baru). `pytest -q` penuh setelah revert -
+exit code 0, `test_current_batch_matches_golden_baseline` HIJAU (v6
+tidak terdampak).

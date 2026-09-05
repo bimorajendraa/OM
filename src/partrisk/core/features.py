@@ -12,6 +12,15 @@ def _log1p(values: pd.Series) -> pd.Series:
     return np.log1p(pd.to_numeric(values, errors="coerce").fillna(0.0).clip(lower=0.0))
 
 
+# Fix NaN-collision, belum dipakai build_features() - docs/DECISIONS.md §49/§52.
+_NEVER_HAPPENED_DAYS_SENTINEL = 9999.0
+
+
+def _log1p_days_since(values: pd.Series) -> pd.Series:
+    filled = pd.to_numeric(values, errors="coerce").fillna(_NEVER_HAPPENED_DAYS_SENTINEL)
+    return np.log1p(filled.clip(lower=0.0))
+
+
 def _age_band(days: pd.Series) -> pd.Series:
     index = np.searchsorted(
         config.AGE_BAND_THRESHOLDS,
@@ -528,6 +537,7 @@ def build_features(raw: pd.DataFrame, support: pd.Series) -> pd.DataFrame:
     features["has_prior_corrective"] = (
         pd.to_numeric(raw["prior_corrective_count"], errors="coerce").fillna(0) > 0
     )
+    # SENGAJA masih _log1p, bukan _log1p_days_since (docs/DECISIONS.md §49/§52).
     features["log_days_since_last_corrective"] = _log1p(raw["days_since_last_corrective"])
     features["log_prior_distinct_places"] = _log1p(raw["prior_distinct_places"])
 

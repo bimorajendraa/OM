@@ -2,7 +2,104 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.stats import beta as _beta
 from sklearn.metrics import precision_recall_curve
+
+
+def precision_lower_bound(true_positive: int, alerts: int, confidence: float = 0.95) -> float:
+    """Batas bawah presisi Clopper-Pearson (docs/DECISIONS.md §43)."""
+    if alerts <= 0 or true_positive <= 0:
+        return 0.0
+    return float(_beta.ppf(1.0 - confidence, true_positive, alerts - true_positive + 1))
+
+
+def select_threshold(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    target_precision: float = 0.85,
+    min_alerts: int = 30,
+    confidence: float = 0.95,
+) -> dict:
+    """Threshold gerbang produksi - batas bawah presisi + min_alerts (docs/DECISIONS.md §43)."""
+    labels = np.asarray(labels).astype(bool)
+    scores = np.asarray(scores, dtype=float)
+    if labels.sum() == 0:
+        return {
+            "feasible": False,
+            "threshold": None,
+            "precision": None,
+            "recall": None,
+            "alerts": None,
+            "true_positive": None,
+            "precision_lower_bound": None,
+            "target_precision": target_precision,
+            "min_alerts": min_alerts,
+            "best_precision_achievable": 0.0,
+            "reason": "Tidak ada label positif pada data ini - threshold tidak bisa dicari.",
+        }
+
+    order = np.argsort(-scores, kind="stable")
+    sorted_scores = scores[order]
+    sorted_labels = labels[order]
+
+    cumulative_alerts = np.arange(1, len(sorted_scores) + 1)
+    cumulative_true_positive = np.cumsum(sorted_labels)
+    is_last_of_tie = np.r_[sorted_scores[:-1] != sorted_scores[1:], True]
+    boundary = np.flatnonzero(is_last_of_tie)
+
+    alerts = cumulative_alerts[boundary]
+    true_positive = cumulative_true_positive[boundary]
+    candidate_thresholds = sorted_scores[boundary]
+    lower = np.array(
+        [
+            precision_lower_bound(int(tp), int(n), confidence)
+            for tp, n in zip(true_positive, alerts, strict=True)
+        ]
+    )
+
+    eligible = (lower >= target_precision) & (alerts >= min_alerts)
+    if not eligible.any():
+        best_idx = int(np.argmax(lower))
+        return {
+            "feasible": False,
+            "threshold": None,
+            "precision": None,
+            "recall": None,
+            "alerts": None,
+            "true_positive": None,
+            "precision_lower_bound": None,
+            "target_precision": target_precision,
+            "min_alerts": min_alerts,
+            "best_precision_achievable": float(lower[best_idx]),
+            "reason": (
+                f"Tidak ada threshold dengan >= {min_alerts} alert yang batas bawah "
+                f"presisinya (Clopper-Pearson {confidence:.0%}) mencapai target "
+                f"{target_precision:.2f}; batas bawah tertinggi yang bisa dicapai "
+                f"{lower[best_idx]:.4f} pada {int(alerts[best_idx])} alert."
+            ),
+        }
+
+    # indeks terbesar = cakupan terbesar di antara yang lolos.
+    idx = int(np.flatnonzero(eligible)[-1])
+    recall = float(true_positive[idx] / int(labels.sum()))
+    return {
+        "feasible": True,
+        "threshold": float(candidate_thresholds[idx]),
+        "precision": float(true_positive[idx] / alerts[idx]),
+        "recall": recall,
+        "alerts": int(alerts[idx]),
+        "true_positive": int(true_positive[idx]),
+        "precision_lower_bound": float(lower[idx]),
+        "target_precision": target_precision,
+        "min_alerts": min_alerts,
+        "best_precision_achievable": float(lower.max()),
+        "reason": (
+            f"Threshold {candidate_thresholds[idx]:.4f} memberi presisi titik-estimasi "
+            f"{true_positive[idx] / alerts[idx]:.4f} dengan batas bawah Clopper-Pearson "
+            f"{confidence:.0%} = {lower[idx]:.4f} (>= target {target_precision:.2f}), "
+            f"recall {recall:.4f}, {int(alerts[idx])} alert (>= min_alerts {min_alerts})."
+        ),
+    }
 
 
 def select_precision_constrained_threshold(

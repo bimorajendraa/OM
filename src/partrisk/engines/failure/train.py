@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,11 +13,46 @@ import pandas as pd
 from catboost import CatBoostClassifier, Pool
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
+from sklearn.model_selection import StratifiedKFold
 
 from partrisk.core import config
 from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
 from partrisk.engines.failure import gate
+
+
+def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Tulis file secara atomik - tempfile + os.replace (docs/DECISIONS.md §50)."""
+    path = Path(path)
+    descriptor, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding=encoding) as handle:
+            handle.write(content)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def cross_fitted_calibration(
+    raw: np.ndarray, y: np.ndarray, n_splits: int = 5, seed: int = config.RANDOM_STATE,
+) -> tuple[np.ndarray, IsotonicRegression]:
+    """Skor out-of-fold untuk seleksi threshold - docs/DECISIONS.md §42."""
+    raw = np.asarray(raw, dtype=float)
+    y = np.asarray(y, dtype=int)
+    out_of_fold = np.zeros_like(raw, dtype=float)
+
+    folds = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    for fit_idx, hold_idx in folds.split(raw.reshape(-1, 1), y):
+        fold_calibrator = IsotonicRegression(out_of_bounds="clip")
+        fold_calibrator.fit(raw[fit_idx], y[fit_idx])
+        out_of_fold[hold_idx] = fold_calibrator.predict(raw[hold_idx])
+
+    final_calibrator = IsotonicRegression(out_of_bounds="clip")
+    final_calibrator.fit(raw, y)
+    return out_of_fold, final_calibrator
 
 
 def next_version(model_dir: Path) -> str:
@@ -233,15 +270,16 @@ def train_model(dataset: pd.DataFrame, features: pd.DataFrame) -> tuple:
     raw_val = model.predict_proba(val_x)[:, 1]
     raw_test = model.predict_proba(test_x)[:, 1]
 
-    calibrator = IsotonicRegression(out_of_bounds="clip")
-    calibrator.fit(raw_val, val_y.astype(int))
+    val_calibrated_out_of_fold, calibrator = cross_fitted_calibration(
+        raw_val, val_y.astype(int).to_numpy()
+    )
 
     metrics = {
         "train": evaluate(train_y, raw_train),
-        "validation": evaluate(val_y, raw_val),
+        "validation": evaluate(val_y, raw_val, val_calibrated_out_of_fold),
         "test": evaluate(test_y, raw_test, calibrator.predict(raw_test)),
     }
-    return model, calibrator, metrics, raw_test
+    return model, calibrator, metrics, raw_test, val_calibrated_out_of_fold
 
 
 def evaluate_incumbent(previous_version: str, dataset: pd.DataFrame, split: str = TEST) -> dict:
@@ -309,25 +347,30 @@ def compute_gate(
     target_test: np.ndarray,
     horizon_days: int = config.TARGET_HORIZON_DAYS,
     target_precision: float = config.FAILURE_GATE_TARGET_PRECISION,
+    min_alerts: int = config.FAILURE_GATE_MIN_ALERTS,
     validation_dataset: pd.DataFrame | None = None,
     test_dataset: pd.DataFrame | None = None,
 ) -> dict:
 
-    selection = gate.select_precision_constrained_threshold(
-        calibrated_val, target_val, target_precision
+    selection = gate.select_threshold(
+        calibrated_val, target_val, target_precision, min_alerts=min_alerts
     )
     result = {
         "horizon_days": horizon_days,
         "target_precision": target_precision,
+        "min_alerts": min_alerts,
         "feasible": selection["feasible"],
         "threshold": selection["threshold"],
         "threshold_basis": (
-            "sklearn.precision_recall_curve pada VALIDATION, recall dimaksimalkan "
-            "dengan syarat presisi >= target_precision, diuji SEKALI di TEST - "
-            "lihat docs/EXPERIMENTS.md E-46/E-47/E-48"
+            "batas bawah presisi Clopper-Pearson 95% (bukan titik-estimasi) pada "
+            "VALIDATION, cakupan/recall dimaksimalkan dengan syarat batas bawah "
+            f">= target_precision DAN alert >= min_alerts ({min_alerts}), diuji "
+            "SEKALI di TEST - lihat docs/DECISIONS.md §43, MODEL_TUNING.md A2, "
+            "docs/EXPERIMENTS.md E-46/E-47/E-48"
         ),
         "validation_metrics": {
             "precision": selection["precision"],
+            "precision_lower_bound": selection["precision_lower_bound"],
             "recall": selection["recall"],
             "alerts": selection["alerts"],
         },
@@ -422,8 +465,8 @@ def save_version(
         "promotion_comparison": promotion_comparison,
         "gate": gate_metadata,
     }
-    (directory / "metadata.json").write_text(
-        json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+    atomic_write_text(
+        directory / "metadata.json", json.dumps(metadata, indent=2, ensure_ascii=False)
     )
     return metadata
 
@@ -439,7 +482,7 @@ def main() -> int:
 
     config.FAILURE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     dataset, features, support_totals, data_end, events, cycles, episodes = build_dataset()
-    model, calibrator, metrics, raw_test = train_model(dataset, features)
+    model, calibrator, metrics, raw_test, _val_oof = train_model(dataset, features)
     fleet = feature_builder.fleet_snapshot(cycles, episodes, data_end)
     item_type_density = feature_builder.item_type_density_snapshot(cycles, events, episodes, data_end)
     cutoffs, cutoff_basis = choose_cutoffs(
@@ -488,9 +531,15 @@ def main() -> int:
         validation_dataset["target_failure"].astype(bool).to_numpy(), validation_window_days,
         config.FAILURE_CAPACITY_PER_MONTH,
     )
+
+    # gerbang wajib pakai out-of-fold, bukan validation_calibrated - docs/DECISIONS.md §42.
+    validation_target = validation_dataset["target_failure"].astype(bool).to_numpy()
+    validation_calibrated_out_of_fold, _ = cross_fitted_calibration(
+        validation_raw, validation_target.astype(int)
+    )
     gate_metadata = compute_gate(
-        validation_calibrated,
-        validation_dataset["target_failure"].astype(bool).to_numpy(),
+        validation_calibrated_out_of_fold,
+        validation_target,
         candidate_calibrated,
         test_dataset["target_failure"].astype(bool).to_numpy(),
         validation_dataset=validation_dataset,
@@ -550,7 +599,7 @@ def main() -> int:
     )
 
     if promote:
-        CURRENT_POINTER.write_text(version, encoding="utf-8")
+        atomic_write_text(CURRENT_POINTER, version)
         print(f"\n[OK] {version} dipakai sebagai model production ({reason}).")
     else:
         print(

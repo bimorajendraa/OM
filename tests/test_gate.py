@@ -60,6 +60,73 @@ def test_select_precision_constrained_threshold_maksimalkan_recall_bukan_presisi
         assert result["recall"] >= strict["recall"]
 
 
+def test_precision_lower_bound_tanpa_true_positive_adalah_nol():
+    assert gate.precision_lower_bound(0, 10) == 0.0
+    assert gate.precision_lower_bound(5, 0) == 0.0
+
+
+def test_precision_lower_bound_lebih_ketat_dari_presisi_titik_estimasi_sampel_kecil():
+    # sampel kecil (9/22) - batas bawah Clopper-Pearson wajib jauh di bawah titik-estimasi.
+    point_estimate = 9 / 22
+    lower = gate.precision_lower_bound(9, 22, confidence=0.95)
+    assert lower < point_estimate - 0.1
+
+
+def test_select_threshold_menolak_winners_curse_yang_diterima_aturan_lama():
+    """Aturan baru wajib menolak winner's curse - docs/DECISIONS.md §43."""
+    n = 200
+    scores = np.linspace(1.0, 0.0, n)
+    labels = np.zeros(n, dtype=bool)
+    labels[:6] = True
+    for i in (8, 10, 13):
+        labels[i] = True
+
+    old = gate.select_precision_constrained_threshold(scores, labels, target_precision=0.40)
+    assert old["feasible"] is True, "prasyarat: aturan LAMA harus menganggap skenario ini feasible"
+    assert old["alerts"] < 30, "prasyarat: aturan lama memilih threshold dengan sedikit alert"
+
+    new = gate.select_threshold(scores, labels, target_precision=0.40, min_alerts=30)
+    assert new["feasible"] is False, (
+        "aturan BARU wajib menolak threshold yang cuma didukung sedikit alert, "
+        "walau presisi titik-estimasinya di atas target"
+    )
+    assert new["threshold"] is None
+
+
+def test_select_threshold_threshold_reproduksi_jumlah_alert_yang_sama_saat_ada_ties():
+    # skor bertangga (isotonic) - alert harus sama persis dgn (scores >= threshold).sum().
+    rng = np.random.default_rng(3)
+    n = 500
+    scores = np.round(rng.random(n), 1)
+    labels = rng.random(n) < (scores * 0.6)
+
+    result = gate.select_threshold(scores, labels, target_precision=0.3, min_alerts=10)
+    assert result["feasible"] is True
+    actual_alerts = int((scores >= result["threshold"]).sum())
+    assert actual_alerts == result["alerts"]
+    actual_true_positive = int(labels[scores >= result["threshold"]].sum())
+    assert actual_true_positive == result["true_positive"]
+
+
+def test_select_threshold_tanpa_label_positif():
+    rng = np.random.default_rng(2)
+    scores = rng.random(200)
+    labels = np.zeros(200, dtype=bool)
+    result = gate.select_threshold(scores, labels, target_precision=0.85)
+    assert result["feasible"] is False
+    assert result["threshold"] is None
+    assert result["best_precision_achievable"] == 0.0
+
+
+def test_select_threshold_maksimalkan_cakupan_bukan_presisi():
+    scores, labels = _synthetic_with_signal()
+    permisif = gate.select_threshold(scores, labels, target_precision=0.30, min_alerts=5)
+    ketat = gate.select_threshold(scores, labels, target_precision=0.85, min_alerts=5)
+    assert permisif["feasible"] is True
+    if ketat["feasible"]:
+        assert permisif["recall"] >= ketat["recall"]
+
+
 def test_honest_test_evaluation_murni_mengukur_bukan_mencari_ulang():
     scores, labels = _synthetic_with_signal()
     selection = gate.select_precision_constrained_threshold(scores, labels, target_precision=0.5)

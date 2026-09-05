@@ -358,20 +358,29 @@ Recall@kapasitas lama, tetap dihitung untuk kontinuitas historis) -
 BUKAN LAGI dasar `/api/v1/recommendations`. Antrian resmi sekarang
 digerbang `FAILURE_GATE_TARGET_PRECISION`, lihat di bawah.
 
-### `FAILURE_GATE_TARGET_PRECISION` = 0,40
+### `FAILURE_GATE_TARGET_PRECISION` = 0,20 (sebelumnya 0,40 - lihat `docs/DECISIONS.md` §44)
 
 Target presisi minimum untuk antrian resmi (`docs/DECISIONS.md` §11) -
 BUKAN 0,85 yang diminta di awal, karena 0,85 terbukti tidak genuinely
 generalize di TEST untuk model/horizon/data apa pun yang diuji
 (`docs/EXPERIMENTS.md` E-46/E-47/E-48 - threshold presisi tinggi selalu
 jatuh ke <10 baris VALIDATION paling ekstrem, kolaps ke 0 alert di TEST).
-0,40 dipilih user secara eksplisit dari sweep threshold yang genuinely
-generalize (E-47: presisi diutamakan di atas volume - "selama presisinya
-tinggi tidak apa 2 bulan sekali"). Threshold aktual (bukan target) dicari
-ulang setiap retrain dari VALIDATION (`train.py::compute_gate()`), diuji
-sekali di TEST, disimpan di `metadata["gate"]["threshold"]` - BUKAN nilai
-tetap. Model `v4` per 2026-08-25: threshold 0,3750, TEST presisi 0,625,
-recall 0,0055, 8 alert.
+0,40 sempat dipilih user dari sweep threshold titik-estimasi (E-47:
+presisi diutamakan di atas volume). Sejak `docs/DECISIONS.md` §42/§43,
+diketahui threshold titik-estimasi 0,40 itu sendiri artefak overfitting
+kalibrator (rasio `10/21` model `v6`) - begitu diukur JUJUR lewat batas
+bawah Clopper-Pearson (`gate.select_threshold()`, `min_alerts=30`),
+0,40 SAMA SEKALI TIDAK TERCAPAI (infeasible di VALIDATION model v6).
+0,20 dipilih ULANG 2026-09-05 dari sweep JUJUR terhadap model v6
+(`docs/DECISIONS.md` §44) berdasarkan biaya inspeksi terbuang: volume
+alert paling wajar (382 VALIDATION / 401 TEST) di titik tertinggi yang
+masih feasible secara robust dalam kisaran 0,20-0,25 yang dipertimbangkan.
+Threshold aktual (bukan target) dicari ulang setiap retrain dari
+VALIDATION (`train.py::compute_gate()`), diuji sekali di TEST, disimpan
+di `metadata["gate"]["threshold"]` - BUKAN nilai tetap. Model `v6` per
+2026-09-05 pada target 0,20: threshold 0,1733, VALIDATION 382 alert
+(presisi titik-estimasi 0,2356, batas bawah 0,2002), TEST 401 alert
+presisi 0,4289 recall 16,23%.
 
 ---
 

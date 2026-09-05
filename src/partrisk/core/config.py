@@ -103,16 +103,18 @@ OBSERVATION_STEP_DAYS = 30
 MIN_OBSERVATION_DATE = "2014-01-01"
 
 CATBOOST_PARAMS = {
-    "iterations": 200,
-    "depth": 4,
+    "iterations": 3000,
+    "depth": 6,
     "learning_rate": 0.03,
     "l2_leaf_reg": 10,
     "loss_function": "Logloss",
-    "eval_metric": "AUC",
+    "eval_metric": "PRAUC",
     "auto_class_weights": "Balanced",
-    "use_best_model": False,
+    "use_best_model": True,
+    "od_type": "Iter",
+    "od_wait": 200,
     "verbose": False,
-    "thread_count": 1,
+    "thread_count": -1,
 }
 RANDOM_STATE = 42
 
@@ -138,7 +140,10 @@ FAILURE_MEDIUM_PROBABILITY_THRESHOLD = 0.15
 FAILURE_CAPACITY_PER_MONTH = 200
 
 
-FAILURE_GATE_TARGET_PRECISION = 0.40
+FAILURE_GATE_TARGET_PRECISION = 0.20
+
+# Syarat minimum alert, cegah winner's curse - docs/DECISIONS.md §43.
+FAILURE_GATE_MIN_ALERTS = 30
 
 
 APPROVED_LOCATION_ALIAS = {"GUDANG NUTECH": "GUDANG NI"}

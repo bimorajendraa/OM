@@ -219,12 +219,13 @@ def resolve_by_item(
 
 def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]:
     """Satu siklus evaluasi alert - dipanggil sekali per scheduled scoring run.
+    Hanya tier CONFIRMED yang boleh membuka alert (docs/DECISIONS.md §45).
 
     Return daftar alert_id yang baru dibuka pada run ini (tidak termasuk
     yang auto-resolved)."""
     auto_resolve_closed_cycles()
 
-    flagged = frame.loc[frame["gate_flagged"]]
+    flagged = frame.loc[frame["work_queue_tier"] == "CONFIRMED"]
     opened_ids: list[int] = []
 
     for _, row in flagged.iterrows():

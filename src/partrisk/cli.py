@@ -651,20 +651,29 @@ _BOOTSTRAP_SEED = 42
 def _update_metadata_json(path: Path, apply) -> dict:
     metadata = json.loads(path.read_text(encoding="utf-8"))
     apply(metadata)
-    path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    training_failure.atomic_write_text(path, json.dumps(metadata, indent=2, ensure_ascii=False))
     return metadata
 
 
 def _bootstrap_classification_ci(
     raw: np.ndarray, calibrated: np.ndarray, target: np.ndarray,
-    window_days: float, capacity_per_month: float, days_per_month: float = 30.0,
+    window_days: float, capacity_per_month: float, cluster_ids: np.ndarray,
+    days_per_month: float = 30.0,
 ) -> dict:
+    """Bootstrap sadar-klaster (resample cluster_ids) - docs/DECISIONS.md §51."""
     rng = np.random.default_rng(_BOOTSTRAP_SEED)
-    n = len(target)
+    cluster_ids = np.asarray(cluster_ids)
+    unique_clusters = np.unique(cluster_ids)
+    n_clusters = len(unique_clusters)
+    rows_by_cluster = {
+        cluster: np.flatnonzero(cluster_ids == cluster) for cluster in unique_clusters
+    }
+
     keys = ("roc_auc", "pr_auc", "precision_at_capacity", "recall_at_capacity")
     samples: dict[str, list[float]] = {key: [] for key in keys}
     for _ in range(_BOOTSTRAP_N):
-        idx = rng.integers(0, n, size=n)
+        sampled_clusters = rng.choice(unique_clusters, size=n_clusters, replace=True)
+        idx = np.concatenate([rows_by_cluster[cluster] for cluster in sampled_clusters])
         try:
             metrics = training_failure.full_metrics(
                 raw[idx], calibrated[idx], target[idx], window_days, capacity_per_month, days_per_month,
@@ -705,24 +714,30 @@ def _bootstrap_ci_failure() -> dict:
         f"      TEST: {len(test_dataset):,} baris, {int(target.sum()):,} kerusakan - "
         f"bootstrap {_BOOTSTRAP_N}x..."
     )
-    ci = _bootstrap_classification_ci(raw, calibrated, target, window_days, config.FAILURE_CAPACITY_PER_MONTH)
+    cluster_ids = test_dataset["installation_cycle_id"].to_numpy()
+    ci = _bootstrap_classification_ci(
+        raw, calibrated, target, window_days, config.FAILURE_CAPACITY_PER_MONTH, cluster_ids,
+    )
     for key in ("roc_auc", "pr_auc", "precision_at_capacity", "recall_at_capacity"):
         print(f"      {key:<24} CI95=[{ci[key][0]}, {ci[key][1]}]")
 
-    path = config.FAILURE_MODEL_DIR / metadata["model_version"] / "metadata.json"
-
-    def _apply(doc: dict) -> None:
-        doc["evaluation_metrics"]["test"]["bootstrap_ci_95"] = ci
-
-    _update_metadata_json(path, _apply)
+    # Perkakas riset - tidak menyentuh metadata.json produksi (docs/DECISIONS.md §50).
+    analysis_dir = config.FAILURE_MODEL_DIR / metadata["model_version"] / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    path = analysis_dir / "bootstrap_ci.json"
+    document = {
+        "model_version": metadata["model_version"],
+        "computed_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "n_boot": _BOOTSTRAP_N,
+        "bootstrap_ci_95": ci,
+    }
+    training_failure.atomic_write_text(path, json.dumps(document, indent=2, ensure_ascii=False))
     print(f"      Disimpan ke {path}")
     return ci
 
 
 def _bootstrap_ci_main() -> int:
-    """FASE 7 P0-2: CI bootstrap 1000-resample untuk metrik headline model
-    kerusakan. Metadata.json ditulis ulang dengan field bootstrap_ci_95
-    baru (field yang dipakai scoring TIDAK disentuh)."""
+    """CI bootstrap 1000-resample, ditulis ke analysis/ - docs/DECISIONS.md §50."""
     _bootstrap_ci_failure()
     return 0
 
@@ -799,7 +814,9 @@ def _precision_gate_experiment_main() -> int:
             dataset, features = dataset_30, features_30
         else:
             dataset, features, *_ = training_failure.build_dataset(horizon_days=horizon_days)
-        model, calibrator, _metrics, _raw_test = training_failure.train_model(dataset, features)
+        model, calibrator, _metrics, _raw_test, _val_oof = training_failure.train_model(
+            dataset, features
+        )
         results.append(
             _gate_candidate_from_model(f"horizon {horizon_days} hari (retrain)", model, calibrator, dataset, features)
         )

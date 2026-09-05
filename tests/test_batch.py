@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -74,3 +75,41 @@ def test_attach_terminal_id_berbentuk_string_bersih_tanpa_desimal():
     ])
     result = data_state._attach_terminal(frame, terminal_raw)
     assert result.loc[0, "terminal_id"] == "12345"
+
+
+def test_build_work_queue_confirmed_selalu_masuk_terlepas_dari_kapasitas():
+    # CONFIRMED tidak boleh dipotong kapasitas - docs/DECISIONS.md §45.
+    gate_flagged = np.array([True, True, True, True, True])
+    scores = np.array([0.9, 0.8, 0.7, 0.6, 0.5])
+    tier = data_state.build_work_queue(gate_flagged, scores, capacity=3)
+    assert list(tier) == ["CONFIRMED"] * 5
+
+
+def test_build_work_queue_ranked_mengisi_sisa_kapasitas_dari_skor_tertinggi():
+    gate_flagged = np.array([True, False, False, False, False])
+    scores = np.array([0.9, 0.8, 0.7, 0.6, 0.5])
+    tier = data_state.build_work_queue(gate_flagged, scores, capacity=3)
+    # sisa kapasitas diisi RANKED dari skor tertinggi non-gate_flagged.
+    assert list(tier) == ["CONFIRMED", "RANKED", "RANKED", None, None]
+
+
+def test_build_work_queue_tidak_ada_ranked_kalau_confirmed_sudah_penuhi_kapasitas():
+    gate_flagged = np.array([True, True, True, False, False])
+    scores = np.array([0.9, 0.8, 0.7, 0.6, 0.5])
+    tier = data_state.build_work_queue(gate_flagged, scores, capacity=2)
+    assert list(tier) == ["CONFIRMED", "CONFIRMED", "CONFIRMED", None, None]
+
+
+def test_build_work_queue_kapasitas_nol_tidak_menghasilkan_ranked():
+    gate_flagged = np.array([False, False, False])
+    scores = np.array([0.9, 0.8, 0.7])
+    tier = data_state.build_work_queue(gate_flagged, scores, capacity=0)
+    assert list(tier) == [None, None, None]
+
+
+def test_build_work_queue_tanpa_yang_confirmed_sama_sekali():
+    gate_flagged = np.array([False, False, False, False])
+    scores = np.array([0.4, 0.9, 0.2, 0.7])
+    tier = data_state.build_work_queue(gate_flagged, scores, capacity=2)
+    # RANKED dari skor tertinggi, bukan urutan baris.
+    assert list(tier) == [None, "RANKED", None, "RANKED"]

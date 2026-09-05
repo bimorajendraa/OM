@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from partrisk import cli
 from partrisk.core import config, data_reader
 from partrisk.core import features as feature_builder
 from partrisk.engines import predict as failure_model
@@ -65,6 +67,73 @@ def test_kolom_fitur_kerusakan_konsisten_lewat_project_features():
 def test_urutan_kolom_kategorikal_dan_numerik_tidak_bercampur():
     n_cat = len(config.CATEGORICAL_FEATURES)
     assert config.FEATURE_COLUMNS[:n_cat] == config.CATEGORICAL_FEATURES
+
+
+def test_log1p_days_since_belum_pernah_tidak_bertabrakan_dengan_hari_ini():
+    """'Belum pernah' vs 'hari ini' tidak boleh collide - docs/DECISIONS.md §49/§52."""
+    values = pd.Series([np.nan, 0.0, 30.0])
+    result = feature_builder._log1p_days_since(values)
+
+    never, today, recent = result.iloc[0], result.iloc[1], result.iloc[2]
+
+    assert never != today, "'belum pernah' tidak boleh sama dengan 'hari ini'"
+    assert today == pytest.approx(0.0), "'hari ini' tetap harus dekat nol"
+    assert never > recent > today, (
+        "'belum pernah' wajib lebih besar dari riwayat 30 hari lalu, yang wajib "
+        "lebih besar dari 'hari ini' - urutan waktu yang masuk akal"
+    )
+
+
+def test_atomic_write_text_menulis_normal():
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        target = Path(tmp_dir) / "metadata.json"
+        train.atomic_write_text(target, "isi baru")
+        assert target.read_text(encoding="utf-8") == "isi baru"
+        assert list(Path(tmp_dir).iterdir()) == [target], "tidak boleh ada file sementara tersisa"
+
+
+def test_atomic_write_text_kegagalan_di_tengah_tidak_merusak_file_lama(monkeypatch):
+    """Kegagalan di tengah os.replace() tidak boleh merusak file lama - docs/DECISIONS.md §50."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        target = Path(tmp_dir) / "metadata.json"
+        target.write_text("isi lama", encoding="utf-8")
+
+        def _boom(*args, **kwargs):
+            raise OSError("simulasi proses mati di tengah os.replace")
+
+        monkeypatch.setattr(train.os, "replace", _boom)
+
+        with pytest.raises(OSError):
+            train.atomic_write_text(target, "isi baru yang gagal ditulis")
+
+        assert target.read_text(encoding="utf-8") == "isi lama", "file lama harus tetap utuh"
+        leftover = [p for p in Path(tmp_dir).iterdir() if p != target]
+        assert leftover == [], f"file sementara harus dibersihkan, tersisa: {leftover}"
+
+
+def test_bootstrap_ci_sadar_klaster_lebih_lebar_dari_resample_baris_iid():
+    """Resample per-baris bikin CI terlalu sempit - docs/DECISIONS.md §51."""
+    rng = np.random.default_rng(0)
+    n_clusters, rows_per_cluster = 20, 50
+    cluster_index = np.repeat(np.arange(n_clusters), rows_per_cluster)
+    cluster_score = rng.uniform(0.05, 0.95, n_clusters)
+    cluster_label = (rng.uniform(0, 1, n_clusters) < cluster_score).astype(int)
+    raw = cluster_score[cluster_index]
+    target = cluster_label[cluster_index].astype(bool)
+    calibrated = raw.copy()
+
+    per_row_ids = np.arange(len(raw))  # setiap baris klasternya sendiri = setara i.i.d. lama
+    real_cycle_ids = np.array([f"CYCLE-{c}" for c in cluster_index])
+
+    old_style = cli._bootstrap_classification_ci(raw, calibrated, target, 60.0, 10, per_row_ids)
+    new_style = cli._bootstrap_classification_ci(raw, calibrated, target, 60.0, 10, real_cycle_ids)
+
+    old_width = old_style["roc_auc"][1] - old_style["roc_auc"][0]
+    new_width = new_style["roc_auc"][1] - new_style["roc_auc"][0]
+    assert new_width > old_width * 2, (
+        f"CI sadar-klaster (lebar={new_width:.4f}) harus jauh lebih lebar dari "
+        f"resample baris i.i.d. (lebar={old_width:.4f}) pada data berkorelasi kuat ini"
+    )
 
 
 @needs_models
@@ -413,6 +482,53 @@ def test_capacity_metrics_days_per_month_mempengaruhi_kapasitas():
     result_30 = training_utils.capacity_metrics(raw, target, window_days=180.0, capacity_per_month=10, days_per_month=30.0)
     result_30_44 = training_utils.capacity_metrics(raw, target, window_days=180.0, capacity_per_month=10, days_per_month=30.44)
     assert result_30["capacity_evaluated"] >= result_30_44["capacity_evaluated"]
+
+
+def test_cross_fitted_calibration_tidak_membocorkan_titik_ekstrem_ke_prediksi_out_of_fold():
+    """Isotonic overfit ke titik langka in-sample, tidak out-of-fold - docs/DECISIONS.md §42."""
+    n_low = 40
+    raw = np.linspace(0.0, 0.5, n_low)
+    y = np.zeros(n_low, dtype=int)
+    for i in (10, 18, 25, 33):
+        y[i] = 1
+
+    raw = np.append(raw, 0.99)
+    y = np.append(y, 1)
+    extreme_idx = len(raw) - 1
+
+    out_of_fold, final_calibrator = train.cross_fitted_calibration(raw, y, n_splits=5, seed=0)
+
+    in_sample_extreme = float(final_calibrator.predict([raw[extreme_idx]])[0])
+    out_of_fold_extreme = float(out_of_fold[extreme_idx])
+
+    assert in_sample_extreme > 0.9, (
+        "prasyarat test: kalibrator full-fit HARUS overfit ke titik ekstrem ini - "
+        "kalau tidak, test ini tidak membuktikan apa pun"
+    )
+    assert out_of_fold_extreme < 0.5, (
+        "prediksi OUT-OF-FOLD titik ekstrem seharusnya jauh dari 1,0 - kalau tidak, "
+        "cross-fitting gagal mengeluarkan titik ini dari fold fit-nya sendiri"
+    )
+    assert out_of_fold_extreme < in_sample_extreme - 0.3
+
+
+def test_cross_fitted_calibration_final_calibrator_dipakai_deploy_dilatih_di_semua_baris():
+    """Kalibrator final tetap dilatih di seluruh data - docs/DECISIONS.md §42."""
+    raw, target = _synthetic(n=200, positive_rate=0.1, seed=1)
+    _, final_calibrator = train.cross_fitted_calibration(raw, target, n_splits=5, seed=1)
+
+    reference = train.IsotonicRegression(out_of_bounds="clip").fit(raw, target)
+    np.testing.assert_allclose(
+        final_calibrator.predict(raw), reference.predict(raw),
+        err_msg="kalibrator final harus identik dengan fit langsung di seluruh data",
+    )
+
+
+def test_cross_fitted_calibration_setiap_baris_dapat_tepat_satu_prediksi_out_of_fold():
+    raw, target = _synthetic(n=300, positive_rate=0.1, seed=2)
+    out_of_fold, _ = train.cross_fitted_calibration(raw, target, n_splits=5, seed=2)
+    assert len(out_of_fold) == len(raw)
+    assert np.isfinite(out_of_fold).all()
 
 
 def test_full_metrics_berisi_seluruh_metrik_yang_disyaratkan():

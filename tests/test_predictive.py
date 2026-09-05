@@ -373,7 +373,15 @@ def cleanup_alert_lifecycle():
 def _flagged_frame(item_id: str, score: float) -> pd.DataFrame:
     return pd.DataFrame([{
         "item_id": item_id, "terminal_label": None, "item_model_code": "0000009",
-        "failure_probability_30d": score, "gate_flagged": True,
+        "failure_probability_30d": score, "gate_flagged": True, "work_queue_tier": "CONFIRMED",
+    }])
+
+
+def _ranked_only_frame(item_id: str, score: float) -> pd.DataFrame:
+    """Tier RANKED - docs/DECISIONS.md §45."""
+    return pd.DataFrame([{
+        "item_id": item_id, "terminal_label": None, "item_model_code": "0000009",
+        "failure_probability_30d": score, "gate_flagged": False, "work_queue_tier": "RANKED",
     }])
 
 
@@ -381,6 +389,20 @@ def _flagged_frame(item_id: str, score: float) -> pd.DataFrame:
 def test_resolve_with_inspection_alert_tidak_ditemukan():
     with pytest.raises(alert_engine.AlertNotFound):
         alert_engine.resolve_with_inspection(999999999, pd.Timestamp.now(tz="UTC"))
+
+
+@needs_database
+@needs_models
+def test_evaluate_and_open_tidak_membuka_alert_untuk_tier_ranked(
+    scorable_item, cleanup_alert_lifecycle
+):
+    """RANKED tidak boleh membuka alert - docs/DECISIONS.md §45."""
+    cleanup_alert_lifecycle.append(scorable_item)
+    scored_at = pd.Timestamp.now(tz="UTC")
+
+    opened_ids = alert_engine.evaluate_and_open(_ranked_only_frame(scorable_item, 0.9), scored_at)
+    assert opened_ids == []
+    assert alert_engine.open_alerts_by_item([scorable_item]) == {}
 
 
 @needs_database

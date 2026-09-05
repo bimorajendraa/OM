@@ -137,6 +137,9 @@ def _compute(generation_value: int) -> BatchScores:
     frame = _attach_context(frame, events)
     frame = _attach_terminal(frame, terminal_raw)
     frame = _attach_recommendation(frame)
+    frame["work_queue_tier"] = build_work_queue(
+        frame["gate_flagged"].to_numpy(), frame["tier_score"].to_numpy()
+    )
     frame = frame.sort_values("tier_score", ascending=False).reset_index(drop=True)
     frame.insert(0, "rank", np.arange(1, len(frame) + 1))
 
@@ -231,6 +234,25 @@ def _score_failure(
         snapshot["item_identifier_clean"].to_numpy(), name="item_id"
     )
     return result, features_by_item
+
+
+def build_work_queue(
+    gate_flagged: np.ndarray,
+    scores: np.ndarray,
+    capacity: int = config.FAILURE_CAPACITY_PER_MONTH,
+) -> np.ndarray:
+    """Antrian CONFIRMED/RANKED - docs/DECISIONS.md §45."""
+    gate_flagged = np.asarray(gate_flagged, dtype=bool)
+    scores = np.asarray(scores, dtype=float)
+    tier = np.full(len(gate_flagged), None, dtype=object)
+    tier[gate_flagged] = "CONFIRMED"
+
+    remaining = max(capacity - int(gate_flagged.sum()), 0)
+    if remaining > 0:
+        candidates = np.flatnonzero(~gate_flagged)
+        candidates = candidates[np.argsort(-scores[candidates], kind="stable")]
+        tier[candidates[:remaining]] = "RANKED"
+    return tier
 
 
 def _attach_context(frame: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
