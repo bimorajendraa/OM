@@ -48,6 +48,23 @@ def record_inspection(
     with db.connect() as conn:
         with conn.cursor() as cur:
             cycle_store.lock_item(cur, item_id)
+
+            if external_event_id is not None:
+                cur.execute(
+                    f"SELECT {_SELECT_COLUMNS} FROM predictive.inspection "
+                    "WHERE external_event_id = %s",
+                    (external_event_id,),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    # Retry idempotent tumpang-tindih dengan request yang masih
+                    # in-flight: cek di luar lock (di alerts.resolve_by_item)
+                    # sudah lolos untuk keduanya, jadi harus dicek ULANG di
+                    # sini setelah pegang advisory lock, sebelum INSERT -
+                    # kalau tidak, request kedua akan menabrak
+                    # ux_inspection_external_event_id (UniqueViolation -> 500).
+                    return _row_to_dict(existing)
+
             cur.execute(
                 "SELECT COALESCE(MAX(inspection_seq), -1) + 1 "
                 "FROM predictive.inspection WHERE host_serial_code = %s",

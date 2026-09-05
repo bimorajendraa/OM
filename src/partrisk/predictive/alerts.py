@@ -228,22 +228,22 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
     flagged = frame.loc[frame["work_queue_tier"] == "CONFIRMED"]
     opened_ids: list[int] = []
 
-    for _, row in flagged.iterrows():
-        item_id = row["item_id"]
-        score = float(row["failure_probability_30d"])
+    with db.connect() as conn:
+        for _, row in flagged.iterrows():
+            item_id = row["item_id"]
+            score = float(row["failure_probability_30d"])
 
-        try:
-            cycle = cycle_store.ensure_active_cycle(item_id)
-        except (cycle_store.ItemNotInstalled, cycle_store.CycleMissingHostSerialCode):
-            continue
-        host_serial_code = cycle["cycle_id"]
+            try:
+                cycle = cycle_store.ensure_active_cycle(item_id)
+            except (cycle_store.ItemNotInstalled, cycle_store.CycleMissingHostSerialCode):
+                continue
+            host_serial_code = cycle["cycle_id"]
 
-        terminal_serial_code = row.get("terminal_label")
-        terminal_serial_code = None if pd.isna(terminal_serial_code) else str(terminal_serial_code)
-        prediction_id = row.get("prediction_id")
-        prediction_id = None if pd.isna(prediction_id) else int(prediction_id)
+            terminal_serial_code = row.get("terminal_label")
+            terminal_serial_code = None if pd.isna(terminal_serial_code) else str(terminal_serial_code)
+            prediction_id = row.get("prediction_id")
+            prediction_id = None if pd.isna(prediction_id) else int(prediction_id)
 
-        with db.connect() as conn:
             with conn.cursor() as cur:
                 cycle_store.lock_item(cur, item_id)
                 next_seq = _next_inspection_seq(cur, host_serial_code)
@@ -253,12 +253,14 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
                     (item_id,),
                 )
                 if cur.fetchone() is not None:
+                    conn.commit()
                     continue
 
                 suppression = _active_suppression(cur, item_id, host_serial_code)
                 if suppression is not None:
                     _, previous_score = suppression
                     if not _emergency_override(score, previous_score):
+                        conn.commit()
                         continue
 
                 cur.execute(
@@ -277,7 +279,7 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
                 alert_id = cur.fetchone()[0]
             conn.commit()
 
-        opened_ids.append(alert_id)
+            opened_ids.append(alert_id)
 
     return opened_ids
 
@@ -317,6 +319,24 @@ def resolve_with_inspection(
             row = cur.fetchone()
             if row is None:
                 raise AlertNotFound(alert_id)
+
+            if external_event_id is not None:
+                cur.execute(
+                    f"SELECT {inspections._SELECT_COLUMNS} FROM predictive.inspection "
+                    "WHERE external_event_id = %s",
+                    (external_event_id,),
+                )
+                existing_inspection = cur.fetchone()
+                if existing_inspection is not None:
+                    inspection_row = inspections._row_to_dict(existing_inspection)
+                    cur.execute(
+                        f"SELECT {_ALERT_SELECT_COLUMNS} FROM predictive.alert WHERE alert_id = %s",
+                        (alert_id,),
+                    )
+                    alert_row = _row_to_alert(cur.fetchone())
+                    conn.commit()
+                    return {"inspection": inspection_row, "alert": alert_row}
+
             if row[0] != "OPEN":
                 raise AlertNotOpen(alert_id, row[0])
 

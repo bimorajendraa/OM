@@ -72,6 +72,12 @@ CORS_ALLOW_ORIGINS = [
 
 API_KEY = os.getenv("API_KEY", "").strip() or None
 
+if API_KEY is None:
+    logger.warning(
+        "API_KEY tidak diset - endpoint POST /api/v1/inspections TERBUKA TANPA "
+        "AUTENTIKASI. Set API_KEY di .env sebelum deploy ke production."
+    )
+
 
 def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
     if API_KEY is None:

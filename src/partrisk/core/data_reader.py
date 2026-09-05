@@ -255,15 +255,18 @@ def _compute_text_maps(conn: psycopg.Connection) -> tuple[dict[str, str], dict[s
     return _TEXT_MAPS
 
 
+def _sql_string_literal(value: str) -> str:
+    return value.replace("'", "''")
+
+
 def _values_cte(name: str, mapping: dict[str, str]) -> str:
     if not mapping:
         return (
             f"{name}(source_value, canonical_value) AS "
             "(SELECT NULL::text, NULL::text WHERE FALSE)"
         )
-    quote = "'"
     rows = ", ".join(
-        "(" + ", ".join(f"{quote}{v.replace(quote, quote * 2)}{quote}" for v in pair) + ")"
+        "(" + ", ".join(f"'{_sql_string_literal(v)}'" for v in pair) + ")"
         for pair in mapping.items()
     )
     return f"{name}(source_value, canonical_value) AS (VALUES {rows})"

@@ -75,6 +75,10 @@ FLEET_FEATURES = [
 ]
 FLEET_WINDOW_DAYS = 90
 
+# Ambang cakupan model minimum supaya fleet_snapshot.csv tersimpan boleh
+# dipakai ulang tanpa dihitung ulang - lihat predict.py::_covers_known_models().
+FLEET_SNAPSHOT_MIN_MODEL_COVERAGE = 0.8
+
 DEGRADATION_FEATURES = [
     "log_cumulative_prior_cycle_days",
     "log_previous_cycle_count",

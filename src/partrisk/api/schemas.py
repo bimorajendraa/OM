@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _CONFIG = ConfigDict(protected_namespaces=(), extra="allow")
 
@@ -43,6 +43,17 @@ class InspectionRequest(BaseModel):
             "ID unik dari aplikasi pemanggil (opsional) - kalau dikirim ulang request dianggap sama dan tidak membuat inspection baru."
         ),
     )
+
+    @field_validator("external_event_id")
+    @classmethod
+    def _blank_is_none(cls, value: str | None) -> str | None:
+        """String kosong/whitespace dianggap "tidak ada ID" - kalau tidak,
+        dua request tak terkait yang sama-sama kirim "" akan salah dianggap
+        idempotent terhadap satu sama lain (lihat inspections.find_by_external_event_id)."""
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
 
 class InspectionResult(BaseModel):

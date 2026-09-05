@@ -64,7 +64,7 @@ def _covers_known_models(snapshot, metadata: dict) -> bool:
     if not known:
         return True
     overlap = len(known & set(snapshot["item_model_code_clean"].astype(str)))
-    return overlap >= 0.8 * len(known)
+    return overlap >= config.FLEET_SNAPSHOT_MIN_MODEL_COVERAGE * len(known)
 
 
 class FailureNotScorable(LookupError):
