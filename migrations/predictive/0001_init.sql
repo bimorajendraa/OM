@@ -38,9 +38,3 @@ CREATE INDEX IF NOT EXISTS ix_item_prediction_terminal
     ON predictive.item_prediction (terminal_serial_code);
 CREATE INDEX IF NOT EXISTS ix_item_prediction_host_serial_code
     ON predictive.item_prediction (host_serial_code);
-
-CREATE OR REPLACE VIEW predictive.valid_item_prediction AS
-SELECT ip.*
-FROM predictive.item_prediction ip
-JOIN predictive.model_run mr ON mr.run_id = ip.run_id
-WHERE mr.status = 'SUCCEEDED';

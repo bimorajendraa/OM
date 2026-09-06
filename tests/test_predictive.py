@@ -311,10 +311,9 @@ def test_record_inspection_menaikkan_seq_dalam_cycle_yang_sama(
     scorable_item, cleanup_item_lifecycle
 ):
     cleanup_item_lifecycle.append(scorable_item)
-    now = pd.Timestamp.now(tz="UTC")
 
-    first = inspections.record_inspection(scorable_item, now)
-    second = inspections.record_inspection(scorable_item, now)
+    first = inspections.record_inspection(scorable_item)
+    second = inspections.record_inspection(scorable_item)
 
     assert first["host_serial_code"] == second["host_serial_code"], (
         "minor repair tidak boleh membuka cycle baru - harus dalam cycle aktif yang sama"
@@ -355,7 +354,7 @@ def _ranked_only_frame(item_id: str, score: float) -> pd.DataFrame:
 @needs_database
 def test_resolve_with_inspection_alert_tidak_ditemukan():
     with pytest.raises(alert_engine.AlertNotFound):
-        alert_engine.resolve_with_inspection(999999999, pd.Timestamp.now(tz="UTC"))
+        alert_engine.resolve_with_inspection(999999999)
 
 
 @needs_database
@@ -389,12 +388,12 @@ def test_evaluate_and_open_lalu_resolve_lalu_ditolak_kalau_diulang(
     assert alert["status"] == "OPEN"
     assert alert["opened_score"] == 0.5
 
-    result = alert_engine.resolve_with_inspection(alert_id, pd.Timestamp.now(tz="UTC"))
+    result = alert_engine.resolve_with_inspection(alert_id)
     assert result["alert"]["status"] == "RESOLVED"
     assert result["inspection"]["alert_id"] == alert_id
 
     with pytest.raises(alert_engine.AlertNotOpen):
-        alert_engine.resolve_with_inspection(alert_id, pd.Timestamp.now(tz="UTC"))
+        alert_engine.resolve_with_inspection(alert_id)
 
 
 @needs_database
@@ -450,7 +449,7 @@ def test_evaluate_and_open_suppressed_setelah_resolve_kecuali_emergency(
     scored_at = pd.Timestamp.now(tz="UTC")
 
     opened_ids = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
-    alert_engine.resolve_with_inspection(opened_ids[0], pd.Timestamp.now(tz="UTC"))
+    alert_engine.resolve_with_inspection(opened_ids[0])
 
     # skor naik sedikit - masih dalam masa suppression, BUKAN emergency jump.
     suppressed = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.55), scored_at)
@@ -579,7 +578,7 @@ def test_resolve_with_inspection_auto_resolve_alert_pada_cycle_lama(
     cleanup_alert_ids.append(alert_id)
 
     with pytest.raises(alert_engine.AlertNotOpen):
-        alert_engine.resolve_with_inspection(alert_id, pd.Timestamp.now(tz="UTC"))
+        alert_engine.resolve_with_inspection(alert_id)
 
     alert = alert_engine.get_alert(alert_id)
     assert alert["status"] == "RESOLVED"
@@ -621,7 +620,7 @@ def test_resolve_by_item_dengan_alert_open_meresolve_alert(
     assert len(opened_ids) == 1
 
     result = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC")
+        scorable_item, scorable_item_host_serial_code
     )
 
     assert result["alert"] is not None
@@ -640,7 +639,7 @@ def test_resolve_by_item_tanpa_alert_open_tetap_mencatat_inspection(
     cleanup_item_lifecycle.append(scorable_item)
 
     result = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC")
+        scorable_item, scorable_item_host_serial_code
     )
 
     assert result["alert"] is None
@@ -650,20 +649,20 @@ def test_resolve_by_item_tanpa_alert_open_tetap_mencatat_inspection(
 
 @needs_database
 @needs_models
-def test_resolve_by_item_dengan_external_event_id_sama_tidak_duplikat(
+def test_resolve_by_item_dengan_idempotency_key_sama_tidak_duplikat(
     scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
 ):
     """Retry aplikasi eksternal (mis. setelah timeout) memakai
-    external_event_id yang sama - harus mengembalikan inspection yang SAMA,
+    idempotency_key yang sama - harus mengembalikan inspection yang SAMA,
     bukan membuat baris baru."""
     cleanup_item_lifecycle.append(scorable_item)
-    external_event_id = f"retry-test-{scorable_item}-{pd.Timestamp.now().value}"
+    idempotency_key = f"retry-test-{scorable_item}-{pd.Timestamp.now().value}"
 
     first = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC"), external_event_id
+        scorable_item, scorable_item_host_serial_code, idempotency_key
     )
     second = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC"), external_event_id
+        scorable_item, scorable_item_host_serial_code, idempotency_key
     )
 
     assert first["inspection"]["inspection_id"] == second["inspection"]["inspection_id"]
@@ -671,27 +670,27 @@ def test_resolve_by_item_dengan_external_event_id_sama_tidak_duplikat(
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM predictive.inspection WHERE external_event_id = %s",
-                (external_event_id,),
+                "SELECT count(*) FROM predictive.inspection WHERE idempotency_key = %s",
+                (idempotency_key,),
             )
             count = cur.fetchone()[0]
-    assert count == 1, "external_event_id yang sama dikirim ulang tidak boleh membuat baris kedua"
+    assert count == 1, "idempotency_key yang sama dikirim ulang tidak boleh membuat baris kedua"
 
 
 @needs_database
 @needs_models
-def test_resolve_by_item_dengan_external_event_id_berbeda_tetap_dua_inspection(
+def test_resolve_by_item_dengan_idempotency_key_berbeda_tetap_dua_inspection(
     scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
 ):
-    """external_event_id BERBEDA berarti perbaikan BERBEDA - keduanya harus
+    """idempotency_key BERBEDA berarti perbaikan BERBEDA - keduanya harus
     tercatat, idempotency tidak boleh menelan inspection yang sah."""
     cleanup_item_lifecycle.append(scorable_item)
 
     first = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC"), f"evt-a-{scorable_item}"
+        scorable_item, scorable_item_host_serial_code, f"evt-a-{scorable_item}"
     )
     second = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC"), f"evt-b-{scorable_item}"
+        scorable_item, scorable_item_host_serial_code, f"evt-b-{scorable_item}"
     )
 
     assert first["inspection"]["inspection_id"] != second["inspection"]["inspection_id"]
@@ -706,7 +705,7 @@ def test_resolve_by_item_host_serial_code_current_berhasil(
     cleanup_item_lifecycle.append(scorable_item)
 
     result = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC")
+        scorable_item, scorable_item_host_serial_code
     )
 
     assert result["inspection"]["item_id"] == scorable_item
@@ -722,7 +721,7 @@ def test_resolve_by_item_host_serial_code_historis_ditolak(scorable_item):
 
     with pytest.raises(alert_engine.HostSerialNotCurrent) as excinfo:
         alert_engine.resolve_by_item(
-            scorable_item, stale_host_serial_code, pd.Timestamp.now(tz="UTC")
+            scorable_item, stale_host_serial_code
         )
 
     assert excinfo.value.given_host_serial_code == stale_host_serial_code
@@ -744,7 +743,7 @@ def test_resolve_by_item_host_serial_code_current_tidak_pengaruhi_item_lain(
             before = cur.fetchone()[0]
 
     alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, pd.Timestamp.now(tz="UTC")
+        scorable_item, scorable_item_host_serial_code
     )
 
     with predictive_db.connect() as conn:

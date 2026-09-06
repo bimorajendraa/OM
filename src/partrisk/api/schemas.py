@@ -37,19 +37,21 @@ class InspectionRequest(BaseModel):
     host_serial_code: str = Field(
         description="Label fisik PART (format MODEL-PAIRINGCODE-REPAIRSEQ)."
     )
-    external_event_id: str | None = Field(
+    idempotency_key: str | None = Field(
         default=None,
         description=(
-            "ID unik dari aplikasi pemanggil (opsional) - kalau dikirim ulang request dianggap sama dan tidak membuat inspection baru."
+            "Kunci retry-safety dari aplikasi pemanggil (opsional) - kirim ulang "
+            "request dengan nilai yang SAMA dianggap request yang sama dan tidak "
+            "akan membuat inspection kedua."
         ),
     )
 
-    @field_validator("external_event_id")
+    @field_validator("idempotency_key")
     @classmethod
     def _blank_is_none(cls, value: str | None) -> str | None:
-        """String kosong/whitespace dianggap "tidak ada ID" - kalau tidak,
+        """String kosong/whitespace dianggap "tidak ada kunci" - kalau tidak,
         dua request tak terkait yang sama-sama kirim "" akan salah dianggap
-        idempotent terhadap satu sama lain (lihat inspections.find_by_external_event_id)."""
+        idempotent terhadap satu sama lain (lihat inspections.find_by_idempotency_key)."""
         if value is None:
             return None
         value = value.strip()
@@ -64,8 +66,7 @@ class InspectionResult(BaseModel):
     host_serial_code: str
     inspection_seq: int
     alert_id: int | None
-    external_event_id: str | None
-    performed_at: str
+    idempotency_key: str | None
     created_at: str
 
 

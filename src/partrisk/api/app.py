@@ -8,7 +8,6 @@ import sys
 import threading
 from contextlib import asynccontextmanager
 
-import pandas as pd
 import psycopg_pool
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
@@ -206,7 +205,7 @@ def record_inspection(payload: InspectionRequest) -> dict:
             message=f"PART dengan serial code '{payload.host_serial_code}' tidak ditemukan.",
         )
     result = alert_engine.resolve_by_item(
-        item_id, payload.host_serial_code, pd.Timestamp.now(tz="UTC"), payload.external_event_id
+        item_id, payload.host_serial_code, payload.idempotency_key
     )
     return {
         "inspection": _stringify_datetimes(result["inspection"]),

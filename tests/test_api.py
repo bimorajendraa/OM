@@ -121,11 +121,11 @@ def test_inspection_endpoint_tanpa_host_serial_code_ditolak(client):
 
 def test_inspection_endpoint_menolak_field_typo(client):
     """docs/DECISIONS.md §41 - extra="forbid" di InspectionRequest supaya
-    typo nama field (mis. external_event_idx) langsung 422, bukan diam-diam
+    typo nama field (mis. idempotency_keyx) langsung 422, bukan diam-diam
     diabaikan (extra="allow" lama akan menelan typo tanpa peringatan)."""
     response = client.post(
         "/api/v1/inspections",
-        json={"host_serial_code": "TIDAK-ADA", "external_event_idx": "WO-123"},
+        json={"host_serial_code": "TIDAK-ADA", "idempotency_keyx": "WO-123"},
     )
     assert response.status_code == 422
 

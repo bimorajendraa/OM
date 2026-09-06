@@ -188,16 +188,15 @@ def _emergency_override(current_score: float, previous_score: float | None) -> b
 def resolve_by_item(
     item_id: str,
     host_serial_code: str,
-    performed_at: pd.Timestamp,
-    external_event_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict:
     """Jalur MANUAL diidentifikasi lewat item (bukan alert_id).
     `host_serial_code` harus cycle AKTIF item ini sekarang - raise
     `HostSerialNotCurrent` kalau caller pakai serial code lama
-    (docs/DECISIONS.md §41). `external_event_id` opsional - retry
+    (docs/DECISIONS.md §41). `idempotency_key` opsional - retry
     idempotent, lihat docs/CODE_NOTES.md."""
-    if external_event_id is not None:
-        existing = inspections.find_by_external_event_id(external_event_id)
+    if idempotency_key is not None:
+        existing = inspections.find_by_idempotency_key(idempotency_key)
         if existing is not None:
             alert = get_alert(existing["alert_id"]) if existing["alert_id"] is not None else None
             return {"inspection": existing, "alert": alert}
@@ -208,11 +207,11 @@ def resolve_by_item(
 
     alert = open_alerts_by_item([item_id]).get(item_id)
     if alert is not None:
-        result = resolve_with_inspection(alert["alert_id"], performed_at, external_event_id)
+        result = resolve_with_inspection(alert["alert_id"], idempotency_key)
         return {"inspection": result["inspection"], "alert": result["alert"]}
 
     inspection_row = inspections.record_inspection(
-        item_id, performed_at, external_event_id=external_event_id
+        item_id, idempotency_key=idempotency_key
     )
     return {"inspection": inspection_row, "alert": None}
 
@@ -285,7 +284,7 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
 
 
 def resolve_with_inspection(
-    alert_id: int, performed_at: pd.Timestamp, external_event_id: str | None = None
+    alert_id: int, idempotency_key: str | None = None
 ) -> dict:
     """Jalur MANUAL untuk mematikan alert."""
     alert = get_alert(alert_id)
@@ -304,13 +303,6 @@ def resolve_with_inspection(
             raise AlertNotOpen(alert_id, auto_resolved["status"])
         raise AlertCycleMismatch(alert_id, alert["host_serial_code"], current_cycle["cycle_id"])
 
-    performed_at_value = (
-        performed_at.to_pydatetime() if isinstance(performed_at, pd.Timestamp) else performed_at
-    )
-    suppression_until = (
-        pd.Timestamp(performed_at_value) + pd.Timedelta(days=config.ALERT_SUPPRESSION_DAYS)
-    ).to_pydatetime()
-
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -320,11 +312,11 @@ def resolve_with_inspection(
             if row is None:
                 raise AlertNotFound(alert_id)
 
-            if external_event_id is not None:
+            if idempotency_key is not None:
                 cur.execute(
                     f"SELECT {inspections._SELECT_COLUMNS} FROM predictive.inspection "
-                    "WHERE external_event_id = %s",
-                    (external_event_id,),
+                    "WHERE idempotency_key = %s",
+                    (idempotency_key,),
                 )
                 existing_inspection = cur.fetchone()
                 if existing_inspection is not None:
@@ -346,26 +338,23 @@ def resolve_with_inspection(
             cur.execute(
                 f"""
                 INSERT INTO predictive.inspection
-                    (item_id, host_serial_code, inspection_seq, alert_id, external_event_id, performed_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (item_id, host_serial_code, inspection_seq, alert_id, idempotency_key)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING {inspections._SELECT_COLUMNS}
                 """,
-                (
-                    alert["item_id"], alert["host_serial_code"], next_seq, alert_id,
-                    external_event_id, performed_at_value,
-                ),
+                (alert["item_id"], alert["host_serial_code"], next_seq, alert_id, idempotency_key),
             )
             inspection_row = inspections._row_to_dict(cur.fetchone())
 
             cur.execute(
                 f"""
                 UPDATE predictive.alert
-                SET status = 'RESOLVED', resolved_at = %s,
-                    suppression_until = %s, updated_at = now()
+                SET status = 'RESOLVED', resolved_at = now(),
+                    suppression_until = now() + make_interval(days => %s), updated_at = now()
                 WHERE alert_id = %s
                 RETURNING {_ALERT_SELECT_COLUMNS}
                 """,
-                (performed_at_value, suppression_until, alert_id),
+                (config.ALERT_SUPPRESSION_DAYS, alert_id),
             )
             alert_row = _row_to_alert(cur.fetchone())
         conn.commit()
