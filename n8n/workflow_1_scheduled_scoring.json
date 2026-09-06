@@ -1,0 +1,188 @@
+{
+  "name": "PartRisk - Workflow 1 - Scheduled Scoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 */6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "0ad8f306-9eab-425b-b20f-29fae9f7f0ae",
+      "name": "Schedule Scoring",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/OM && .venv/bin/python -m partrisk.cli score-and-persist"
+      },
+      "id": "9e85356a-48ab-4c18-a1fe-7b27bb44dbea",
+      "name": "Run score-and-persist",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "fdf1339d-346e-4a54-a70e-0341a0692d6b",
+              "leftValue": "={{$json.exitCode ?? 0}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1b58576a-946d-48e6-b6f4-a292085bbfc2",
+      "name": "Command Sukses?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "d39dd8a0-954c-49f2-bc7f-9c2fe45cbf6a",
+      "name": "Prediction and Alert Tersimpan",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        750,
+        220
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "6fce21e8-2131-4c0b-b79e-b9d07915bf72",
+      "name": "Catat-Notify Scoring Error",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        750,
+        420
+      ],
+      "notes": "Ganti node ini dengan Slack/Email/Telegram node sesuai kanal notifikasi tim."
+    },
+    {
+      "parameters": {},
+      "id": "560dc9cc-3040-46a2-a114-37be6eed53c4",
+      "name": "Scoring Gagal",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Workflow 1 - Scheduled Scoring (NO DB PULL)\n\nscore-and-persist HANYA membaca schema operasional (read-only) dan menulis ke schema predictive - tidak ada proses pull/refresh data operasional di sini (itu tanggung jawab scheduler tim lain).\n\nAtur ulang cron di node trigger sesuai kebutuhan (contoh: tiap 6 jam).",
+        "height": 160,
+        "width": 420
+      },
+      "id": "fc6e7392-544a-4d0a-a1ec-360b27c6e3a7",
+      "name": "Note-c12a353e",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Scoring": {
+      "main": [
+        [
+          {
+            "node": "Run score-and-persist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run score-and-persist": {
+      "main": [
+        [
+          {
+            "node": "Command Sukses?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Command Sukses?": {
+      "main": [
+        [
+          {
+            "node": "Prediction and Alert Tersimpan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Catat-Notify Scoring Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Catat-Notify Scoring Error": {
+      "main": [
+        [
+          {
+            "node": "Scoring Gagal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "partrisk-om"
+  }
+}

@@ -118,7 +118,7 @@ CATBOOST_PARAMS = {
     "od_type": "Iter",
     "od_wait": 200,
     "verbose": False,
-    "thread_count": -1,
+    "thread_count": 2,
 }
 RANDOM_STATE = 42
 

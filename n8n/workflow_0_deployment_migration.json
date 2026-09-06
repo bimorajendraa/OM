@@ -1,0 +1,323 @@
+{
+  "name": "PartRisk - Workflow 0 - Deployment & Database Migration",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "7c175fe4-4629-4ab7-a447-3b0994eb147c",
+      "name": "Deploy / Schema Change",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/OM && git pull --ff-only"
+      },
+      "id": "b85a672f-b0ee-4c97-81f6-f8f9a7195982",
+      "name": "Update Kode OM",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/OM && .venv/bin/pip install -r requirements-serving.txt"
+      },
+      "id": "8f4605e5-6f1a-4098-af48-b84e676d13c2",
+      "name": "Install-Update Dependencies",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/OM && .venv/bin/python -m partrisk.predictive.db migrate"
+      },
+      "id": "11bcaf1a-ba4b-474a-b07b-5ae1c466cc14",
+      "name": "Run Predictive Migration",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        750,
+        300
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "439b12d6-4c67-4d2b-bd6b-b6b99ef68065",
+              "leftValue": "={{$json.exitCode ?? 0}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6e3de46a-3f54-4998-997b-8829d89e6fa9",
+      "name": "Migration Exit Code 0?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/OM && docker compose up -d --build"
+      },
+      "id": "18ae5282-53a2-4a54-a60a-beb0c39d88ae",
+      "name": "Start-Restart OM API (Docker)",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        220
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/health?check_database=true",
+        "options": {}
+      },
+      "id": "52f1bc93-406a-4c36-ae12-057900ea0403",
+      "name": "Health Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1500,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "05af13ef-ecf7-4269-a3f6-2d610ea55093",
+              "leftValue": "={{$json.status}}",
+              "rightValue": "ok",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dadaae77-3a1f-446a-abe2-3e8cacbc0bf2",
+      "name": "Health OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1750,
+        220
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "29e3ddfd-508a-4b08-a344-837b92a31a42",
+      "name": "Deployment Siap",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        180
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "b10063cd-29e1-47c6-8845-26dcf1a97065",
+      "name": "Stop and Perbaiki Deployment",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        480
+      ],
+      "notes": "Gagal di migration ATAU health check - hentikan rollout, jangan lanjut, investigasi manual."
+    },
+    {
+      "parameters": {
+        "content": "Workflow 0 - Deployment & Migration\n\nGanti kredensial SSH (\"OM Server SSH\") dan sesuaikan path /opt/OM di tiap node SSH sebelum dipakai.\n\nMigration idempotent (docs/DATABASE.md) - aman dijalankan ulang kalau deployment sebelumnya gagal di tengah jalan.",
+        "height": 160,
+        "width": 420
+      },
+      "id": "c26843bc-ffce-449a-87bf-ddda3d989097",
+      "name": "Note-c7a69d15",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Deploy / Schema Change": {
+      "main": [
+        [
+          {
+            "node": "Update Kode OM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Kode OM": {
+      "main": [
+        [
+          {
+            "node": "Install-Update Dependencies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Install-Update Dependencies": {
+      "main": [
+        [
+          {
+            "node": "Run Predictive Migration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Predictive Migration": {
+      "main": [
+        [
+          {
+            "node": "Migration Exit Code 0?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Migration Exit Code 0?": {
+      "main": [
+        [
+          {
+            "node": "Start-Restart OM API (Docker)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop and Perbaiki Deployment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start-Restart OM API (Docker)": {
+      "main": [
+        [
+          {
+            "node": "Health Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Check": {
+      "main": [
+        [
+          {
+            "node": "Health OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health OK?": {
+      "main": [
+        [
+          {
+            "node": "Deployment Siap",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop and Perbaiki Deployment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "partrisk-om"
+  }
+}

@@ -1,0 +1,316 @@
+{
+  "name": "PartRisk - Workflow 3 - Retraining and Model Promotion",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 3 1 * *"
+            }
+          ]
+        }
+      },
+      "id": "18e0de4c-239d-4e7f-bb29-d99f7bd64ffd",
+      "name": "Monthly-OnDemand Retrain",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cat /opt/OM/models/failure/CURRENT"
+      },
+      "id": "d4a44bb2-b69e-4b49-94d1-46faac6717ac",
+      "name": "Read CURRENT Before",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/OM && .venv/bin/python -m partrisk.engines.failure.train"
+      },
+      "id": "14b0b257-1b4a-4e50-a480-a6067859d111",
+      "name": "Train Candidate plus Promotion Gate",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        500,
+        300
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      },
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "7d762892-bbf0-4cf5-9ddb-341ef179c098",
+              "leftValue": "={{$json.exitCode ?? 0}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f463e7f9-e1cd-4a10-a1da-1a88319c93e9",
+      "name": "Training Command Sukses?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        750,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "9e3f8777-2a04-4569-88d0-a40370c378a6",
+      "name": "Retraining Gagal",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cat /opt/OM/models/failure/CURRENT"
+      },
+      "id": "5a9f640f-cef1-4170-8d1d-4ca333238200",
+      "name": "Read CURRENT After",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        220
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "5c0d4722-e313-47eb-92ff-cbacf9997c4c",
+              "leftValue": "={{$json.stdout.trim() === $node[\"Read CURRENT Before\"].json.stdout.trim() ? 'sama' : 'beda'}}",
+              "rightValue": "beda",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8055389e-a6ec-41fb-952a-4411a0a60a3f",
+      "name": "CURRENT Berubah?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "command": "cd /opt/OM && .venv/bin/python -m partrisk.cli score-and-persist"
+      },
+      "id": "6ea73124-a5dd-49df-a700-48bebca9b06d",
+      "name": "Score dengan Model Baru",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        140
+      ],
+      "credentials": {
+        "sshPassword": {
+          "id": "REPLACE_WITH_SSH_CREDENTIAL_ID",
+          "name": "OM Server SSH"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "375d5cd5-8074-47e9-b8b1-8a2a5469a98d",
+      "name": "Model Baru Aktif plus Scored",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1750,
+        140
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "4d1fa823-cc51-41d8-933d-d00900e76508",
+      "name": "Candidate Disimpan; CURRENT Tetap",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Workflow 3 - Retraining & Promotion\n\nJANGAN tambahkan --force-promote di sini - promosi otomatis hanya boleh terjadi lewat gate PR-AUC/Recall@kapasitas bawaan train.py (lihat engines/failure/train.py::decide_promotion). --force-promote itu untuk override MANUAL oleh manusia, bukan untuk dijadwalkan.\n\n'CURRENT Berubah?' membandingkan isi file CURRENT sebelum vs sesudah training - kalau train.py memutuskan TIDAK promote, file itu tidak berubah, jadi cabang 'held' yang jalan.",
+        "height": 220,
+        "width": 420
+      },
+      "id": "6b4ff476-afe5-4f4d-b0f7-59e54a877db8",
+      "name": "Note-d240ec39",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Monthly-OnDemand Retrain": {
+      "main": [
+        [
+          {
+            "node": "Read CURRENT Before",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CURRENT Before": {
+      "main": [
+        [
+          {
+            "node": "Train Candidate plus Promotion Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Train Candidate plus Promotion Gate": {
+      "main": [
+        [
+          {
+            "node": "Training Command Sukses?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Training Command Sukses?": {
+      "main": [
+        [
+          {
+            "node": "Read CURRENT After",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retraining Gagal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read CURRENT After": {
+      "main": [
+        [
+          {
+            "node": "CURRENT Berubah?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CURRENT Berubah?": {
+      "main": [
+        [
+          {
+            "node": "Score dengan Model Baru",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Candidate Disimpan; CURRENT Tetap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score dengan Model Baru": {
+      "main": [
+        [
+          {
+            "node": "Model Baru Aktif plus Scored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "partrisk-om"
+  }
+}
