@@ -60,16 +60,12 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
                                -- NOT NULL konsisten DB+Python+API sejak §41.
   p30, p60, p90, p120, risk_level, gate_flagged,
   scored_at, model_version
-
-predictive.valid_item_prediction   -- VIEW, §41 - BUKAN tabel
-  = SELECT ip.* FROM item_prediction ip JOIN model_run mr USING (run_id)
-    WHERE mr.status = 'SUCCEEDED'
-  Cara AMAN baca "prediksi yang sah" - item_prediction MENTAH bisa berisi
-  baris dari model_run yang ujungnya FAILED (commit-nya terjadi SEBELUM
-  evaluate_and_open()/complete_run() selesai, §37) - konsumen (internal
-  maupun aplikasi eksternal yang baca schema predictive langsung) yang
-  butuh "prediksi terbaru/aktif" HARUS lewat view ini atau JOIN
-  model_run.status='SUCCEEDED' sendiri, bukan query item_prediction polos.
+  PENTING: baris di sini bisa berasal dari model_run yang UJUNGNYA FAILED -
+  record_predictions() commit SEBELUM evaluate_and_open()/complete_run()
+  selesai (§37). View predictive.valid_item_prediction yang dulu jadi
+  penyaring ini sudah DIHAPUS (konsumen eksternal ternyata baca tabel ini
+  langsung, bukan view) - konsumen yang butuh "prediksi yang sah" HARUS
+  JOIN model_run WHERE status='SUCCEEDED' sendiri di query mereka.
 
 predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, RENAME §31
   inspection_id, item_id, host_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id),

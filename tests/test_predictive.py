@@ -63,39 +63,6 @@ def test_fail_run_menandai_gagal_dengan_pesan(cleanup_run_ids):
 
 
 @needs_database
-def test_valid_item_prediction_view_kecualikan_failed_run(cleanup_run_ids):
-    """docs/DECISIONS.md §41 - prediction dari model_run FAILED tidak boleh
-    dianggap valid/aktif. predictive.valid_item_prediction (JOIN model_run
-    WHERE status='SUCCEEDED') adalah cara aman konsumen eksternal membaca
-    'prediksi yang sah', bukan item_prediction mentah."""
-    succeeded_run = scoring.start_run("test-model-v0")
-    cleanup_run_ids.append(succeeded_run)
-    failed_run = scoring.start_run("test-model-v0")
-    cleanup_run_ids.append(failed_run)
-
-    frame = pd.DataFrame([_valid_prediction_row("TEST-VALID-VIEW-OK")])
-    scoring.record_predictions(succeeded_run, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
-    scoring.complete_run(succeeded_run, row_count=1)
-
-    frame2 = pd.DataFrame([_valid_prediction_row("TEST-VALID-VIEW-FAILED")])
-    scoring.record_predictions(failed_run, frame2, "test-model-v0", pd.Timestamp.now(tz="UTC"))
-    scoring.fail_run(failed_run, "sengaja digagalkan untuk test")
-
-    with predictive_db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT host_serial_code FROM predictive.valid_item_prediction WHERE run_id = ANY(%s)",
-                ([succeeded_run, failed_run],),
-            )
-            visible = {row[0] for row in cur.fetchall()}
-
-    assert "0000000-TEST-VALID-VIEW-OK-00" in visible, "prediction dari SUCCEEDED run harus valid"
-    assert "0000000-TEST-VALID-VIEW-FAILED-00" not in visible, (
-        "prediction dari FAILED run tidak boleh muncul sebagai prediction valid/aktif"
-    )
-
-
-@needs_database
 def test_record_predictions_menulis_baris_sesuai_frame(cleanup_run_ids):
     run_id = scoring.start_run("test-model-v0")
     cleanup_run_ids.append(run_id)
