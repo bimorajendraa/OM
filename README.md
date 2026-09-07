@@ -8,8 +8,8 @@ terpisah - lihat `docs/DATABASE.md`.
 
 ## Satu model: prediksi kerusakan
 
-| Pertanyaan | Model | Status |
-|---|---|---|
+| Pertanyaan                     | Model                               | Status                |
+| ------------------------------ | ----------------------------------- | --------------------- |
 | PART mana yang dirawat duluan? | CatBoost, 32 fitur, horizon 30 hari | mesin keputusan utama |
 
 ```
@@ -94,9 +94,9 @@ python -m partrisk.cli bootstrap-ci                  # CI bootstrap metrik headl
 
 ## Endpoint
 
-| Endpoint | Kegunaan |
-|---|---|
-| `GET /health` | status aplikasi, versi model, kesegaran cache batch (`?check_database=true` untuk ikut menguji koneksi DB) |
+| Endpoint                   | Kegunaan                                                                                                                                                                            |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /health`              | status aplikasi, versi model, kesegaran cache batch (`?check_database=true` untuk ikut menguji koneksi DB)                                                                          |
 | `POST /api/v1/inspections` | catat satu perbaikan untuk satu PART, diidentifikasi lewat `host_serial_code` (body) - resolve alert OPEN kalau ada, transaksional (`predictive/alerts.py`, lihat docs/DATABASE.md) |
 
 Tidak ada endpoint GET lain - aplikasi eksternal yang butuh baca
@@ -109,22 +109,14 @@ prediksi/alert langsung baca schema `predictive` dari database
 ROC-AUC 0,8501 · PR-AUC 0,2116 (lift ~8,5x dibanding acak) · Brier
 terkalibrasi 0,0221. Angka mode eksplorasi (peringkat penuh, bukan lagi
 dasar antrian resmi): precision@200/bln 0,2604 · recall@kapasitas 0,3640.
-**Keputusan promosi antar-versi digerbang di VALIDATION, bukan TEST**
-(`docs/DECISIONS.md` §13) - VALIDATION jauh lebih stabil antar-retrain
-(ROC-AUC/PR-AUC ~0,815/~0,111) daripada TEST, jangan bandingkan versi
-model dari angka TEST saja (lihat `docs/EXPERIMENTS.md` E-44).
 
-**Antrian resmi (`docs/DECISIONS.md` §11, sejak 2026-08-25):** gerbang
-presisi, bukan kuota tetap - PART hanya direkomendasikan kalau
+gerbang presisi, bukan kuota tetap - PART hanya direkomendasikan kalau
 `failure_probability_30d` melewati threshold yang teruji jujur di TEST
 (dicari dari VALIDATION saja). `v6`: threshold 0,4762, TEST presisi
 0,50, recall 0,0027, 6 alert. **Antrian boleh kosong** kalau
 memang tidak ada PART yang cukup meyakinkan - model tidak dipaksa mengisi
 kuota. **Bukan** "model tahu kapan PART akan rusak" - model mengurutkan
 risiko, bukan meramal tanggal.
-
-Detail metrik lengkap, interval kepercayaan, dan metodologi ada di
-`docs/METHODOLOGY.md`.
 
 ## Yang tidak bisa dijawab sistem ini
 
@@ -161,7 +153,7 @@ src/partrisk/
 │   ├── inspections.py            catat tindakan teknisi - inspection_seq DALAM cycle aktif
 │   └── alerts.py                 alert persisten: buka (scheduled scoring), baca (live), resolve (inspection manual atau auto lewat cycle tertutup)
 ├── api/
-│   ├── app.py                  FastAPI: /health + POST /api/v1/inspections saja (docs/DECISIONS.md §29)
+│   ├── app.py                  FastAPI: /health + POST /api/v1/inspections saja
 │   └── schemas.py               bentuk request/response API
 └── cli.py                      pipeline/predict/score-and-persist/resolve-closed-alerts/golden-batch/baseline/backtest/dst - lihat `python -m partrisk.cli -h`
 
@@ -169,7 +161,7 @@ migrations/predictive/   SQL migrasi schema predictive, terurut nomor - lihat do
 tests/           conftest.py + test_pipeline.py + test_lifecycle.py + test_gate.py +
                  test_batch.py + test_api.py + test_predictive.py
 docs/            METHODOLOGY.md (indeks per simbol) · CODE_NOTES.md (catatan
-                 implementasi dari kode) · EXPERIMENTS.md (log eksperimen
+                 implementasi dari kode)
                  kronologis, 80+) · DECISIONS.md (ADR) · DATABASE.md (schema predictive)
 models/          failure/{CURRENT,v3..v6}
 ```
@@ -178,20 +170,6 @@ Fitur dihitung oleh **fungsi yang sama** untuk training maupun prediction -
 kesetaraan single vs batch dijaga `tests/test_lifecycle.py`, jadi tidak
 mungkin ada perbedaan antara fitur yang dipelajari model dan yang dipakai
 production.
-
-## Dokumentasi lanjutan
-
-- **`docs/METHODOLOGY.md`** - keputusan teknis per simbol/konstanta
-  (`grep NAMA_KONSTANTA docs/METHODOLOGY.md`).
-- **`docs/CODE_NOTES.md`** - seluruh komentar implementasi yang sebelumnya
-  berada di `src/` dan `tests/`, dikelompokkan menurut file,
-  scope fungsi/class, dan lokasi historisnya.
-- **`docs/DECISIONS.md`** - ADR: aturan promosi model, arah dependensi
-  `api -> serving`, prosedur rollback lewat `CURRENT`, prasyarat deployment
-  (autentikasi API, dst), dan riwayat keputusan menghapus Survival/Scrap
-  dari scope production.
-- **`docs/EXPERIMENTS.md`** - 42+ eksperimen penelitian, satu section per
-  eksperimen, kronologis. Eksperimen baru menambah section, bukan file baru.
 
 ## Pagar keras (tidak boleh dilanggar)
 
