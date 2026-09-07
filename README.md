@@ -92,11 +92,6 @@ python -m partrisk.cli rolling-lifecycle-backtest    # wajib sebelum klaim kandi
 python -m partrisk.cli bootstrap-ci                  # CI bootstrap metrik headline
 ```
 
-Command riset FASE 8 lainnya (`attach-gate`, `precision-gate-experiment`,
-`lifecycle-gate-experiment`) ada di `cli.py` - alat sekali-pakai untuk
-eksperimen yang sudah terdokumentasi di `docs/EXPERIMENTS.md`, bukan
-dijalankan rutin.
-
 ## Endpoint
 
 | Endpoint | Kegunaan |

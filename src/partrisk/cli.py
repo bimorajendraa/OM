@@ -648,13 +648,6 @@ _BOOTSTRAP_N = 1000
 _BOOTSTRAP_SEED = 42
 
 
-def _update_metadata_json(path: Path, apply) -> dict:
-    metadata = json.loads(path.read_text(encoding="utf-8"))
-    apply(metadata)
-    training_failure.atomic_write_text(path, json.dumps(metadata, indent=2, ensure_ascii=False))
-    return metadata
-
-
 def _bootstrap_classification_ci(
     raw: np.ndarray, calibrated: np.ndarray, target: np.ndarray,
     window_days: float, capacity_per_month: float, cluster_ids: np.ndarray,
@@ -742,191 +735,6 @@ def _bootstrap_ci_main() -> int:
     return 0
 
 
-_GATE_HORIZONS_DAYS = (7, 14, 30)
-_GATE_TARGET_PRECISION = 0.85
-
-
-def _gate_candidate_result(
-    name: str,
-    calibrated_val: np.ndarray,
-    target_val: np.ndarray,
-    calibrated_test: np.ndarray,
-    target_test: np.ndarray,
-) -> dict:
-    selection = gate.select_precision_constrained_threshold(
-        calibrated_val, target_val, _GATE_TARGET_PRECISION
-    )
-    print(f"      [{name}] VALIDATION: {selection['reason']}")
-    result = {"name": name, "validation": selection, "test": None, "reliability": None}
-    if not selection["feasible"]:
-        return result
-
-    result["test"] = gate.honest_test_evaluation(calibrated_test, target_test, selection["threshold"])
-    result["reliability"] = gate.reliability_table(calibrated_val, target_val).to_dict("records")
-    print(
-        f"      [{name}] TEST (threshold beku {selection['threshold']:.4f}): "
-        f"presisi={result['test']['precision']:.4f} recall={result['test']['recall']:.4f} "
-        f"alert={result['test']['alerts']}"
-    )
-    gaps = [abs(row["mean_predicted"] - row["observed_rate"]) for row in result["reliability"]]
-    if gaps:
-        print(f"      [{name}] kalibrasi VALIDATION: gap rata2={sum(gaps)/len(gaps):.4f} maks={max(gaps):.4f}")
-    return result
-
-
-def _gate_candidate_from_model(name: str, model, calibrator, dataset: pd.DataFrame, features: pd.DataFrame) -> dict:
-    val_mask = dataset["split"].eq(training_failure.VALIDATION).to_numpy()
-    test_mask = dataset["split"].eq(training_failure.TEST).to_numpy()
-    calibrated_val = calibrator.predict(model.predict_proba(features[val_mask])[:, 1])
-    calibrated_test = calibrator.predict(model.predict_proba(features[test_mask])[:, 1])
-    target_val = dataset.loc[val_mask, "target_failure"].astype(bool).to_numpy()
-    target_test = dataset.loc[test_mask, "target_failure"].astype(bool).to_numpy()
-    return _gate_candidate_result(name, calibrated_val, target_val, calibrated_test, target_test)
-
-
-def _precision_gate_experiment_main() -> int:
-    """Langkah 1: threshold presisi >= 85% dicari HANYA dari VALIDATION lalu
-    diuji SEKALI (jujur) di TEST - untuk baseline production (30 hari,
-    TANPA retrain) dan kandidat horizon 7/14/30 hari (retrain baru). Tidak
-    ada model yang disimpan ke models/failure/ dari eksperimen ini."""
-    production_version = training_failure.current_version(config.FAILURE_MODEL_DIR)
-    if production_version is None:
-        raise SystemExit("Tidak ada model failure CURRENT.")
-    print(f"[baseline] {production_version} production (30 hari, tanpa retrain)...")
-    dataset_30, features_30, *_ = training_failure.build_dataset()
-    incumbent_val = training_failure.evaluate_incumbent(
-        production_version, dataset_30, split=training_failure.VALIDATION
-    )
-    incumbent_test = training_failure.evaluate_incumbent(
-        production_version, dataset_30, split=training_failure.TEST
-    )
-    results = [
-        _gate_candidate_result(
-            f"baseline {production_version} (30 hari, tanpa retrain)",
-            incumbent_val["calibrated"], incumbent_val["target"],
-            incumbent_test["calibrated"], incumbent_test["target"],
-        )
-    ]
-
-    for horizon_days in _GATE_HORIZONS_DAYS:
-        print(f"\n[horizon {horizon_days}d] Menyusun dataset & melatih kandidat...")
-        if horizon_days == config.TARGET_HORIZON_DAYS:
-            dataset, features = dataset_30, features_30
-        else:
-            dataset, features, *_ = training_failure.build_dataset(horizon_days=horizon_days)
-        model, calibrator, _metrics, _raw_test, _val_oof = training_failure.train_model(
-            dataset, features
-        )
-        results.append(
-            _gate_candidate_from_model(f"horizon {horizon_days} hari (retrain)", model, calibrator, dataset, features)
-        )
-
-    print(f"\n[ringkasan - target presisi >= {_GATE_TARGET_PRECISION:.0%}]")
-    for result in results:
-        val = result["validation"]
-        if not val["feasible"]:
-            print(
-                f"      {result['name']:<32} INFEASIBLE "
-                f"(presisi maks VALIDATION={val['best_precision_achievable']:.4f})"
-            )
-            continue
-        test = result["test"]
-        print(
-            f"      {result['name']:<32} threshold={val['threshold']:.4f} | "
-            f"TEST presisi={test['precision']:.4f} recall={test['recall']:.4f} alert={test['alerts']}"
-        )
-    return 0
-
-
-def _attach_gate_main() -> int:
-    """Tempel blok `gate` (docs/EXPERIMENTS.md E-46/E-47/E-48) ke
-    metadata.json versi CURRENT model failure - dipakai SEKALI untuk
-    artifact yang dilatih sebelum fitur gerbang presisi ditambahkan
-    (mis. v4). Retrain berikutnya lewat train.py::main() sudah menghitung
-    blok ini sendiri, tidak perlu perintah ini lagi."""
-    version = training_failure.current_version(config.FAILURE_MODEL_DIR)
-    if version is None:
-        raise SystemExit("Tidak ada model failure CURRENT.")
-    print(f"[1/2] Menghitung gerbang presisi>={config.FAILURE_GATE_TARGET_PRECISION:.0%} "
-          f"untuk {version} (VALIDATION+TEST, dukungan beku)...")
-    dataset, *_ = training_failure.build_dataset()
-    validation = training_failure.evaluate_incumbent(version, dataset, split=training_failure.VALIDATION)
-    test = training_failure.evaluate_incumbent(version, dataset, split=training_failure.TEST)
-    gate_metadata = training_failure.compute_gate(
-        validation["calibrated"], validation["target"], test["calibrated"], test["target"],
-        validation_dataset=dataset.loc[dataset["split"].eq(training_failure.VALIDATION)],
-        test_dataset=dataset.loc[dataset["split"].eq(training_failure.TEST)],
-    )
-    if gate_metadata["feasible"]:
-        tm = gate_metadata["test_metrics"]
-        print(
-            f"      threshold={gate_metadata['threshold']:.4f}  TEST presisi={tm['precision']:.4f} "
-            f"recall={tm['recall']:.4f} alert={tm['alerts']}"
-        )
-    else:
-        print("      INFEASIBLE di VALIDATION - blok gate ditulis dengan feasible=false")
-
-    path = config.FAILURE_MODEL_DIR / version / "metadata.json"
-
-    def _apply(doc: dict) -> None:
-        doc["gate"] = gate_metadata
-
-    _update_metadata_json(path, _apply)
-    print(f"[2/2] Disimpan ke {path}")
-    return 0
-
-
-_LIFECYCLE_SWEEP_TARGETS = (0.30, 0.40, 0.50, 0.60, 0.70, 0.85)
-
-
-def _lifecycle_gate_experiment_main() -> int:
-    print("[1/3] Menyusun dataset (sama seperti train.py::build_dataset)...")
-    dataset, _features, _support_totals, data_end, _events, _cycles, _episodes = (
-        training_failure.build_dataset()
-    )
-    print(f"      data s/d {data_end}, {len(dataset):,} baris eligible")
-
-    print("[2/3] Skor model production v4 (dukungan beku dari metadata)...")
-    model, calibrator, metadata = predict.load_failure_model()
-    support = feature_builder.part_model_support(dataset, metadata["part_model_support"])
-    candidate_features = feature_builder.build_features(dataset, support)[metadata["features"]]
-    calibrated = calibrator.predict(model.predict_proba(candidate_features)[:, 1])
-
-    val_mask = dataset["split"].eq(training_failure.VALIDATION).to_numpy()
-    test_mask = dataset["split"].eq(training_failure.TEST).to_numpy()
-    val_dataset, val_scores = dataset.loc[val_mask], calibrated[val_mask]
-    test_dataset, test_scores = dataset.loc[test_mask], calibrated[test_mask]
-    print(
-        f"      VALIDATION: {len(val_dataset):,} baris, "
-        f"{val_dataset['installation_cycle_id'].nunique():,} lifecycle"
-    )
-    print(
-        f"      TEST:       {len(test_dataset):,} baris, "
-        f"{test_dataset['installation_cycle_id'].nunique():,} lifecycle"
-    )
-
-    print(f"\n[3/3] Sweep target presisi lifecycle {_LIFECYCLE_SWEEP_TARGETS}...")
-    header = f"{'target':>8}{'VAL presisi':>13}{'VAL recall':>12}{'VAL alert':>11}   {'TEST presisi':>13}{'TEST recall':>12}{'TEST alert':>11}"
-    print(header)
-    for target in _LIFECYCLE_SWEEP_TARGETS:
-        selection = gate.select_lifecycle_threshold(val_dataset, val_scores, target_precision=target)
-        if not selection["feasible"]:
-            print(f"{target:>8.2f}   INFEASIBLE (presisi maks VALIDATION={selection['best_precision_achievable']:.4f})")
-            continue
-        test_eval = gate.lifecycle_metrics(test_dataset, test_scores, selection["threshold"])
-        print(
-            f"{target:>8.2f}{selection['precision']:>13.4f}{selection['recall']:>12.4f}"
-            f"{selection['promoted_cycles']:>11}   "
-            f"{test_eval['precision']:>13.4f}{test_eval['recall']:>12.4f}{test_eval['promoted_cycles']:>11}"
-        )
-        if target == 0.85 and test_eval["true_positive_cycles"] > 0:
-            print(
-                f"          TEST lead time (hari, TP): mean={test_eval['lead_time_days_mean']:.1f} "
-                f"median={test_eval['lead_time_days_median']:.1f}"
-            )
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="partrisk.cli", description="Entry point manual partrisk (dulu scripts/*.py terpisah)."
@@ -986,18 +794,6 @@ def main() -> int:
         "bootstrap-ci",
         help="CI bootstrap 1000-resample untuk metrik headline model failure.",
     )
-    sub.add_parser(
-        "precision-gate-experiment",
-        help="Langkah 1: cari threshold presisi>=85% untuk baseline v4 vs kandidat horizon 7/14/30 hari.",
-    )
-    sub.add_parser(
-        "attach-gate",
-        help="Tempel blok gate (ambang presisi FAILURE_GATE_TARGET_PRECISION) ke metadata.json model failure CURRENT.",
-    )
-    sub.add_parser(
-        "lifecycle-gate-experiment",
-        help="Fase 8 Langkah A: sweep gerbang presisi di tingkat lifecycle (first-alert), bukan per-baris.",
-    )
 
     args = parser.parse_args()
 
@@ -1021,12 +817,6 @@ def main() -> int:
         return _rolling_lifecycle_backtest_main()
     if args.command == "bootstrap-ci":
         return _bootstrap_ci_main()
-    if args.command == "precision-gate-experiment":
-        return _precision_gate_experiment_main()
-    if args.command == "attach-gate":
-        return _attach_gate_main()
-    if args.command == "lifecycle-gate-experiment":
-        return _lifecycle_gate_experiment_main()
     return 1
 
 
