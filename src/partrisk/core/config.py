@@ -146,7 +146,7 @@ FAILURE_CAPACITY_PER_MONTH = 200
 
 FAILURE_GATE_TARGET_PRECISION = 0.20
 
-# Syarat minimum alert, cegah winner's curse - docs/DECISIONS.md §43.
+# Syarat minimum alert, cegah winner's curse.
 FAILURE_GATE_MIN_ALERTS = 30
 
 

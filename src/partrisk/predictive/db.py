@@ -1,10 +1,3 @@
-"""Koneksi tulis ke schema `predictive` - TERPISAH dari `core.data_reader`
-(yang tetap read-only, membaca data operasional).
-
-Hanya kode di paket `partrisk.predictive` yang boleh menulis ke database -
-lihat docs/DATABASE.md untuk batasan schema `predictive` vs operasional.
-"""
-
 from __future__ import annotations
 
 import sys

@@ -12,7 +12,7 @@ def _log1p(values: pd.Series) -> pd.Series:
     return np.log1p(pd.to_numeric(values, errors="coerce").fillna(0.0).clip(lower=0.0))
 
 
-# Fix NaN-collision, belum dipakai build_features() - docs/DECISIONS.md §49/§52.
+# Fix NaN-collision, belum dipakai build_features()
 _NEVER_HAPPENED_DAYS_SENTINEL = 9999.0
 
 

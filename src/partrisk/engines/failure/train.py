@@ -22,7 +22,6 @@ from partrisk.engines.failure import gate
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
-    """Tulis file secara atomik - tempfile + os.replace (docs/DECISIONS.md §50)."""
     path = Path(path)
     descriptor, tmp_name = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
@@ -364,9 +363,7 @@ def compute_gate(
         "threshold_basis": (
             "batas bawah presisi Clopper-Pearson 95% (bukan titik-estimasi) pada "
             "VALIDATION, cakupan/recall dimaksimalkan dengan syarat batas bawah "
-            f">= target_precision DAN alert >= min_alerts ({min_alerts}), diuji "
-            "SEKALI di TEST - lihat docs/DECISIONS.md §43, MODEL_TUNING.md A2, "
-            "docs/EXPERIMENTS.md E-46/E-47/E-48"
+            f">= target_precision DAN alert >= min_alerts ({min_alerts}), diuji SEKALI di TEST"
         ),
         "validation_metrics": {
             "precision": selection["precision"],
@@ -570,8 +567,7 @@ def main() -> int:
         "candidate": candidate_metrics,
         "incumbent": incumbent_metrics,
         "note": (
-            "dihitung untuk laporan/audit SAJA - TIDAK dipakai untuk keputusan "
-            "promosi (lihat docs/DECISIONS.md §13)"
+            "dihitung untuk laporan saja"
         ),
     }
 

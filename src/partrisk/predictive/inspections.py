@@ -1,4 +1,4 @@
-"""Pencatatan tindakan teknisi/aplikasi eksternal (predictive.inspection)."""
+"""Pencatatan tindakan teknisi/aplikasi eksternal (predictive.inspection_history)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from partrisk.predictive import cycles as cycle_store
 from partrisk.predictive import db
 
 _COLUMNS = (
-    "inspection_id", "item_id", "host_serial_code", "inspection_seq", "alert_id",
+    "inspection_id", "item_serial_code", "inspection_seq", "alert_id",
     "created_at",
 )
 
@@ -23,7 +23,7 @@ def record_inspection(
 ) -> dict:
     """Catat satu inspection untuk `item_id`, dalam cycle aktifnya saat ini."""
     cycle = cycle_store.ensure_active_cycle(item_id)
-    host_serial_code = cycle["cycle_id"]
+    item_serial_code = cycle["cycle_id"]
 
     with db.connect() as conn:
         with conn.cursor() as cur:
@@ -31,19 +31,19 @@ def record_inspection(
 
             cur.execute(
                 "SELECT COALESCE(MAX(inspection_seq), -1) + 1 "
-                "FROM predictive.inspection WHERE host_serial_code = %s",
-                (host_serial_code,),
+                "FROM predictive.inspection_history WHERE item_serial_code = %s",
+                (item_serial_code,),
             )
             next_seq = cur.fetchone()[0]
 
             cur.execute(
                 f"""
-                INSERT INTO predictive.inspection
-                    (item_id, host_serial_code, inspection_seq, alert_id)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO predictive.inspection_history
+                    (item_serial_code, inspection_seq, alert_id)
+                VALUES (%s, %s, %s)
                 RETURNING {_SELECT_COLUMNS}
                 """,
-                (cycle["item_id"], host_serial_code, next_seq, alert_id),
+                (item_serial_code, next_seq, alert_id),
             )
             row = cur.fetchone()
         conn.commit()

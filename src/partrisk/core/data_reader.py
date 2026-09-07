@@ -689,17 +689,6 @@ def _normalize(item_id: str) -> str:
 
 
 def resolve_item_by_host_serial_code(host_serial_code: str) -> str | None:
-    """Cari item_id internal (item_identifier_clean, dipakai seluruh schema
-    predictive - cycle/inspection/alert) dari host_serial_code: label fisik
-    format MODEL-PAIRINGCODE-REPAIRSEQ yang dibaca teknisi/aplikasi eksternal
-    dari kode PART (journal.t_item_journey.host_serial_code) - lihat
-    docs/DECISIONS.md §28.
-
-    Ambil catatan journal TERBARU yang cocok, bukan yang pertama - host_serial_code
-    menyertakan repair_seq yang berubah tiap perbaikan besar, jadi PART fisik
-    yang sama bisa punya beberapa host_serial_code berbeda sepanjang riwayatnya.
-    Return None kalau tidak ada journal yang cocok sama sekali.
-    """
     sql = f"""
         SELECT COALESCE({_clean('j.item_pairing_code')}, {_clean('j.host_serial_code')})
         FROM journal.t_item_journey j

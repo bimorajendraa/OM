@@ -2,8 +2,7 @@ CREATE TABLE IF NOT EXISTS predictive.alert (
     alert_id BIGSERIAL PRIMARY KEY,
 
     terminal_serial_code TEXT,
-    item_id TEXT NOT NULL,
-    host_serial_code TEXT NOT NULL,
+    item_serial_code TEXT NOT NULL,
     inspection_seq INTEGER NOT NULL,
     prediction_id BIGINT REFERENCES predictive.item_prediction (prediction_id),
 
@@ -20,19 +19,18 @@ CREATE TABLE IF NOT EXISTS predictive.alert (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS ix_alert_item ON predictive.alert (item_id);
-CREATE INDEX IF NOT EXISTS ix_alert_host_serial_code ON predictive.alert (host_serial_code);
+CREATE INDEX IF NOT EXISTS ix_alert_item_serial_code ON predictive.alert (item_serial_code);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_one_open_per_item
-    ON predictive.alert (item_id)
+    ON predictive.alert (split_part(item_serial_code, '-', 2))
     WHERE status = 'OPEN';
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_alert_one_per_prediction
     ON predictive.alert (prediction_id)
     WHERE prediction_id IS NOT NULL;
 
-ALTER TABLE predictive.inspection
+ALTER TABLE predictive.inspection_history
     DROP CONSTRAINT IF EXISTS fk_inspection_alert;
-ALTER TABLE predictive.inspection
+ALTER TABLE predictive.inspection_history
     ADD CONSTRAINT fk_inspection_alert FOREIGN KEY (alert_id)
     REFERENCES predictive.alert (alert_id);

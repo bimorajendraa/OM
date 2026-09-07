@@ -174,15 +174,6 @@ def _split(combined: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def compare(path_a: Path, path_b: Path, *, rtol: float = 1e-9, columns: set[str] | None = None) -> bool:
-    """`columns=None` (default): kolom A dan B harus SAMA PERSIS (perilaku lama).
-
-    `columns={...}`: per tabel (frame/snapshot), dibandingkan hanya irisan
-    `columns` dengan kolom yang benar-benar ada di tabel itu di KEDUA file -
-    tabel yang tidak punya kolom relevan sama sekali dilewati (bukan gagal).
-    Dipakai untuk membuktikan angka Q2 tidak berubah lintas refactor yang
-    SENGAJA mengubah skema (mis. penghapusan Survival/Scrap), bukan untuk
-    pure-move.
-    """
     frame_a, snap_a = _split(pd.read_parquet(path_a))
     frame_b, snap_b = _split(pd.read_parquet(path_b))
 
@@ -352,10 +343,6 @@ def _capacity_table(
 
 
 def _baseline_comparison_main() -> int:
-    """FASE 7 P0-6: precision@kapasitas model production dibandingkan
-    dengan kebijakan urutan kerja yang bisa berjalan TANPA model sama
-    sekali - jawaban paling meyakinkan untuk "lebih baik dari cara kerja
-    sekarang?", bukan cuma "lebih baik dari tebakan acak?"."""
     print("[1/3] Menyusun dataset TEST (sama seperti training_failure.build_dataset)...")
     dataset, _features, support_totals, data_end, events, cycles, episodes = (
         training_failure.build_dataset()
@@ -477,11 +464,6 @@ def _fit_and_evaluate_fold(
 
 
 def _rolling_backtest_main() -> int:
-    """FASE 7 P0-1: ganti satu split TEST dengan fold temporal bergulir,
-    laporkan mean +/- sd - dan pakai itu untuk menjawab pertanyaan yang
-    memicu P0-1: v4 (32 fitur) sungguh lebih baik dari v3 (28 fitur), atau
-    itu cuma adaptasi terhadap satu TEST split (VALIDATION PR-AUC turun
-    v3->v4 sementara TEST naik saat model dipromosikan)?"""
     print("[1/3] Menyusun dataset (sekali, dipakai ulang untuk semua fold)...")
     dataset, features, support_totals, data_end, events, cycles, episodes = (
         training_failure.build_dataset()

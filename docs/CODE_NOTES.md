@@ -22,9 +22,9 @@ Komentar penjelasan (termasuk docstring panjang berisi alasan/riwayat desain) ya
 
 > Sengaja TIDAK ada tabel item_cycle (SUPERSEDED, docs/DECISIONS.md §30) - info cycle dibaca LANGSUNG dari data operasional (core.data_reader.get_cycles()) tiap dibutuhkan, tidak lagi disalin. Concurrency saat menghitung inspection_seq dijaga lewat Postgres advisory lock (pg_advisory_xact_lock, per item_id - lihat predictive/cycles.py::lock_item()) yang tidak butuh baris/tabel untuk dikunci, jadi tabel mirror ini tidak diperlukan lagi.
 
-### `predictive.inspection` — SQL, former lines 9-19
+### `predictive.inspection_history` — SQL, former lines 9-19
 
-> "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): satu baris di sini SUDAH BERARTI satu perbaikan terjadi, apa pun bentuknya (keputusan user, docs/DECISIONS.md §25 update) - BUKAN sekadar "diperiksa", walau namanya "inspection". Sengaja TIDAK ada kolom klasifikasi jenis (type). Sengaja TIDAK ada outcome/action_code/remark/external_* juga - body POST /api/v1/inspections cuma host_serial_code (docs/DECISIONS.md §28), jadi tidak ada lagi apa pun untuk diisi ke kolom itu; idempotency eksternal via external_event_id SENGAJA dilepas (trade-off yang disetujui eksplisit demi kesederhanaan body request - retry menghasilkan baris inspection baru, bukan ditolak).
+> "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): satu baris di sini SUDAH BERARTI satu perbaikan terjadi, apa pun bentuknya (keputusan user, docs/DECISIONS.md §25 update) - BUKAN sekadar "diperiksa", walau namanya "inspection". Sengaja TIDAK ada kolom klasifikasi jenis (type). Sengaja TIDAK ada outcome/action_code/remark/external_* juga - body POST /api/v1/inspections cuma host_serial_code (docs/DECISIONS.md §28), jadi tidak ada lagi apa pun untuk diisi ke kolom itu. Tabel di-rename dari `predictive.inspection` jadi `predictive.inspection_history`, kolom `host_serial_code` di-rename jadi `item_serial_code`, dan `item_id` dibuang total (keputusan user) - identitas stabil PART sekarang diderive dari bagian tengah `item_serial_code` lewat `alerts.py::_pairing_code()`.
 
 ## `migrations/predictive/0003_alerts.sql`
 
@@ -575,7 +575,7 @@ Komentar penjelasan (termasuk docstring panjang berisi alasan/riwayat desain) ya
 
 ### `open_alerts_by_item` — Python, former lines 110
 
-> index 3 = item_id
+> item_id sudah tidak ada sebagai kolom fisik di `alert` (keputusan user) - dict hasil dikembalikan (`by_item`) tetap key-nya item_id, tapi nilainya sekarang DIDERIVE dari `split_part(item_serial_code, '-', 2)` lewat `_pairing_code()`, bukan dibaca langsung dari tuple baris.
 
 ### `evaluate_and_open` — Python, former lines 271-274
 
@@ -595,7 +595,7 @@ Komentar penjelasan (termasuk docstring panjang berisi alasan/riwayat desain) ya
 
 ### `resolve_by_item` — Python, former lines 211-222
 
-> Jalur MANUAL diidentifikasi lewat item (bukan alert_id) - dipakai endpoint `POST /api/v1/inspections`, body-nya cuma `host_serial_code` (diresolve ke `item_id` internal oleh caller lewat `core.data_reader.resolve_item_by_host_serial_code()` sebelum masuk sini - lihat docs/DECISIONS.md §28). Kalau item ini SEDANG punya alert OPEN, resolve alert itu - delegasi penuh ke `resolve_with_inspection()` (transaksi/suppression/cycle-mismatch-handling yang sama persis, tidak diduplikasi di sini). Kalau TIDAK ada alert OPEN, tetap catat inspection - satu POST tetap berarti ada perbaikan (docs/DECISIONS.md §25), hanya saja tidak ada alert yang perlu ditutup.
+> Jalur MANUAL diidentifikasi lewat item (bukan alert_id) - dipakai endpoint `POST /api/v1/inspections`, body-nya cuma `host_serial_code` (diresolve ke `item_id` internal oleh caller lewat `core.data_reader.resolve_item_by_host_serial_code()` sebelum masuk sini - lihat docs/DECISIONS.md §28). Item WAJIB SEDANG punya alert OPEN (keputusan user, SUPERSEDED dari §25 - dulu tanpa alert OPEN tetap mencatat inspection berdiri sendiri) - kalau tidak, raise `NoOpenAlert` (HTTP 409 `NO_OPEN_ALERT`). Kalau ada, delegasi penuh ke `resolve_with_inspection()` (transaksi/suppression/cycle-mismatch-handling yang sama persis, tidak diduplikasi di sini).
 
 ### `evaluate_and_open` — Python, former lines 234-254
 
@@ -639,7 +639,7 @@ Komentar penjelasan (termasuk docstring panjang berisi alasan/riwayat desain) ya
 
 ### `module` — Python, former lines 1-14
 
-> Pencatatan tindakan teknisi/aplikasi eksternal (predictive.inspection) - lihat docs/DATABASE.md dan docs §10/22/23 master prompt refactor.
+> Pencatatan tindakan teknisi/aplikasi eksternal (predictive.inspection_history, SEBELUMNYA predictive.inspection - rename tabel, keputusan user) - lihat docs/DATABASE.md dan docs §10/22/23 master prompt refactor.
 >
 > "inspection" (SEBELUMNYA "intervention" - rename istilah, arti TIDAK berubah, docs/DECISIONS.md §31): tidak ada klasifikasi jenis - satu POST berarti satu PERBAIKAN terjadi, apa pun bentuknya (keputusan user, docs/DECISIONS.md §25 update), BUKAN sekadar "diperiksa". Tidak ada outcome/remark juga - body POST /api/v1/inspections cuma host_serial_code (docs/DECISIONS.md §28). Sempat ada idempotency_key opsional (SEBELUMNYA external_event_id, §37) - DIHAPUS lagi (keputusan user) setelah endpoint diwajibkan cuma boleh merespons alert OPEN.
 >

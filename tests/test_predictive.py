@@ -90,8 +90,8 @@ def test_record_predictions_menulis_baris_sesuai_frame(cleanup_run_ids):
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT host_serial_code, terminal_serial_code, p30, risk_level, gate_flagged "
-                "FROM predictive.item_prediction WHERE run_id = %s ORDER BY host_serial_code",
+                "SELECT item_serial_code, terminal_serial_code, p30, risk_level, gate_flagged "
+                "FROM predictive.item_prediction WHERE run_id = %s ORDER BY item_serial_code",
                 (run_id,),
             )
             rows = cur.fetchall()
@@ -121,7 +121,7 @@ def test_record_predictions_append_only_tidak_menimpa_baris_lama(cleanup_run_ids
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*) FROM predictive.item_prediction "
-                "WHERE run_id = %s AND host_serial_code = '0000003-TEST-ITEM-003-00'",
+                "WHERE run_id = %s AND item_serial_code = '0000003-TEST-ITEM-003-00'",
                 (run_id,),
             )
             count = cur.fetchone()[0]
@@ -166,8 +166,8 @@ def test_record_predictions_menolak_host_serial_code_kosong():
 
 
 @needs_database
-def test_db_menolak_host_serial_code_null_di_item_prediction(cleanup_run_ids):
-    """docs/DECISIONS.md §41 - kontrak host_serial_code NOT NULL ditegakkan
+def test_db_menolak_item_serial_code_null_di_item_prediction(cleanup_run_ids):
+    """docs/DECISIONS.md §41 - kontrak item_serial_code NOT NULL ditegakkan
     DUA lapis: guard Python (test di atas) DAN constraint database - kalau
     guard Python suatu saat dilewati/bug, database tetap menolak."""
     run_id = scoring.start_run("test-model-v0")
@@ -175,11 +175,11 @@ def test_db_menolak_host_serial_code_null_di_item_prediction(cleanup_run_ids):
 
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
-            with pytest.raises(Exception, match="host_serial_code|not-null|null value"):
+            with pytest.raises(Exception, match="item_serial_code|not-null|null value"):
                 cur.execute(
                     """
                     INSERT INTO predictive.item_prediction
-                        (run_id, host_serial_code, p30, p60, p90, p120, risk_level,
+                        (run_id, item_serial_code, p30, p60, p90, p120, risk_level,
                          gate_flagged, scored_at, model_version)
                     VALUES (%s, NULL, 0.1, 0.1, 0.1, 0.1, 'LOW', FALSE, now(), 'test-model-v0')
                     """,
@@ -192,7 +192,7 @@ def test_db_menolak_host_serial_code_null_di_item_prediction(cleanup_run_ids):
 def test_prediction_ids_for_run_memetakan_item_id_ke_prediction_id(cleanup_run_ids):
     """docs/DECISIONS.md §32/§38 - dipakai run_and_persist() menautkan
     alert.prediction_id ke baris item_prediction yang memicunya, dipetakan
-    lewat host_serial_code (bukan item_id - kolom itu sudah dibuang §39)."""
+    lewat item_serial_code (bukan item_id - kolom itu sudah dibuang §39)."""
     run_id = scoring.start_run("test-model-v0")
     cleanup_run_ids.append(run_id)
 
@@ -222,7 +222,7 @@ def test_prediction_ids_for_run_memetakan_item_id_ke_prediction_id(cleanup_run_i
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT prediction_id FROM predictive.item_prediction "
-                "WHERE run_id = %s AND host_serial_code = '0000011-TEST-ITEM-011-00'",
+                "WHERE run_id = %s AND item_serial_code = '0000011-TEST-ITEM-011-00'",
                 (run_id,),
             )
             (expected_id,) = cur.fetchone()
@@ -268,7 +268,8 @@ def cleanup_item_lifecycle():
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM predictive.inspection WHERE item_id = ANY(%s)", (touched_items,)
+                "DELETE FROM predictive.inspection_history "
+                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s)", (touched_items,)
             )
         conn.commit()
 
@@ -315,7 +316,7 @@ def test_record_inspection_menaikkan_seq_dalam_cycle_yang_sama(
     first = inspections.record_inspection(scorable_item)
     second = inspections.record_inspection(scorable_item)
 
-    assert first["host_serial_code"] == second["host_serial_code"], (
+    assert first["item_serial_code"] == second["item_serial_code"], (
         "minor repair tidak boleh membuka cycle baru - harus dalam cycle aktif yang sama"
     )
     assert second["inspection_seq"] == first["inspection_seq"] + 1
@@ -330,9 +331,13 @@ def cleanup_alert_lifecycle():
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM predictive.inspection WHERE item_id = ANY(%s)", (touched_items,)
+                "DELETE FROM predictive.inspection_history "
+                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s)", (touched_items,)
             )
-            cur.execute("DELETE FROM predictive.alert WHERE item_id = ANY(%s)", (touched_items,))
+            cur.execute(
+                "DELETE FROM predictive.alert "
+                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s)", (touched_items,)
+            )
         conn.commit()
 
 
@@ -384,7 +389,7 @@ def test_evaluate_and_open_lalu_resolve_lalu_ditolak_kalau_diulang(
     alert_id = opened_ids[0]
 
     alert = alert_engine.get_alert(alert_id)
-    assert alert["item_id"] == scorable_item
+    assert alert_engine._pairing_code(alert["item_serial_code"]) == scorable_item
     assert alert["status"] == "OPEN"
     assert alert["opened_score"] == 0.5
 
@@ -505,17 +510,17 @@ def cleanup_alert_ids():
         conn.commit()
 
 
-def _insert_open_alert(item_id: str, host_serial_code: str) -> int:
+def _insert_open_alert(item_serial_code: str) -> int:
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO predictive.alert
-                    (item_id, host_serial_code, inspection_seq, opened_at, opened_score, status)
-                VALUES (%s, %s, 0, now(), 0.5, 'OPEN')
+                    (item_serial_code, inspection_seq, opened_at, opened_score, status)
+                VALUES (%s, 0, now(), 0.5, 'OPEN')
                 RETURNING alert_id
                 """,
-                (item_id, host_serial_code),
+                (item_serial_code,),
             )
             alert_id = cur.fetchone()[0]
         conn.commit()
@@ -526,23 +531,24 @@ def _insert_open_alert(item_id: str, host_serial_code: str) -> int:
 def test_db_menolak_dua_open_alert_untuk_item_id_yang_sama(cleanup_alert_ids):
     """docs/DECISIONS.md §41 - satu physical item maksimal satu actionable
     OPEN alert, ditegakkan constraint database (ux_alert_one_open_per_item),
-    BUKAN cuma logic aplikasi - dites dengan DUA host_serial_code BERBEDA
-    (simulasi old cycle vs current cycle) untuk item_id yang SAMA."""
-    fake_item = "TEST-DUPLICATE-OPEN-ITEM"
-    alert_id = _insert_open_alert(fake_item, f"{fake_item}-OLD-CYCLE")
+    BUKAN cuma logic aplikasi - dites dengan DUA item_serial_code BERBEDA
+    (simulasi old cycle vs current cycle, REPAIRSEQ beda) untuk item
+    (pairing code, bagian tengah) yang SAMA."""
+    alert_id = _insert_open_alert("TESTMODEL-DUPITEM-01")
     cleanup_alert_ids.append(alert_id)
 
     with pytest.raises(Exception, match="ux_alert_one_open_per_item|duplicate key"):
-        _insert_open_alert(fake_item, f"{fake_item}-NEW-CYCLE")
+        _insert_open_alert("TESTMODEL-DUPITEM-02")
 
 
 @needs_database
 def test_db_mengizinkan_dua_item_berbeda_masing_masing_open_alert(cleanup_alert_ids):
-    """Kasus 4 - dua item_id BERBEDA tetap boleh masing-masing punya OPEN
-    alert secara bersamaan; constraint hanya berlaku PER item_id."""
-    alert_id_a = _insert_open_alert("TEST-ITEM-A-DISTINCT", "TEST-ITEM-A-DISTINCT-00")
+    """Kasus 4 - dua item (pairing code, bagian tengah item_serial_code)
+    BERBEDA tetap boleh masing-masing punya OPEN alert secara bersamaan;
+    constraint hanya berlaku PER item."""
+    alert_id_a = _insert_open_alert("TESTMODEL-ITEMA-00")
     cleanup_alert_ids.append(alert_id_a)
-    alert_id_b = _insert_open_alert("TEST-ITEM-B-DISTINCT", "TEST-ITEM-B-DISTINCT-00")
+    alert_id_b = _insert_open_alert("TESTMODEL-ITEMB-00")
     cleanup_alert_ids.append(alert_id_b)
 
     assert alert_id_a != alert_id_b
@@ -556,7 +562,7 @@ def test_db_mengizinkan_dua_item_berbeda_masing_masing_open_alert(cleanup_alert_
 def test_auto_resolve_closed_cycles_menutup_alert_pada_cycle_yang_sudah_berakhir(
     closed_cycle, cleanup_alert_ids
 ):
-    alert_id = _insert_open_alert(closed_cycle["item_id"], closed_cycle["cycle_id"])
+    alert_id = _insert_open_alert(closed_cycle["cycle_id"])
     cleanup_alert_ids.append(alert_id)
 
     resolved_ids = alert_engine.auto_resolve_closed_cycles([closed_cycle["item_id"]])
@@ -574,7 +580,7 @@ def test_resolve_with_inspection_auto_resolve_alert_pada_cycle_lama(
     tertutup di data operasional (item sudah pindah cycle), alert lama itu
     auto-resolved dulu (bukan AlertCycleMismatch mentah) - lihat WHY di
     resolve_with_inspection()."""
-    alert_id = _insert_open_alert(closed_cycle["item_id"], closed_cycle["cycle_id"])
+    alert_id = _insert_open_alert(closed_cycle["cycle_id"])
     cleanup_alert_ids.append(alert_id)
 
     with pytest.raises(alert_engine.AlertNotOpen):
@@ -682,8 +688,7 @@ def test_resolve_by_item_host_serial_code_current_berhasil(
         scorable_item, scorable_item_host_serial_code
     )
 
-    assert result["inspection"]["item_id"] == scorable_item
-    assert result["inspection"]["host_serial_code"] == scorable_item_host_serial_code
+    assert result["inspection"]["item_serial_code"] == scorable_item_host_serial_code
 
 
 @needs_database
@@ -716,7 +721,10 @@ def test_resolve_by_item_host_serial_code_current_tidak_pengaruhi_item_lain(
 
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM predictive.inspection WHERE item_id != %s", (scorable_item,))
+            cur.execute(
+                "SELECT count(*) FROM predictive.inspection_history "
+                "WHERE split_part(item_serial_code, '-', 2) != %s", (scorable_item,)
+            )
             before = cur.fetchone()[0]
 
     alert_engine.resolve_by_item(
@@ -725,7 +733,10 @@ def test_resolve_by_item_host_serial_code_current_tidak_pengaruhi_item_lain(
 
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM predictive.inspection WHERE item_id != %s", (scorable_item,))
+            cur.execute(
+                "SELECT count(*) FROM predictive.inspection_history "
+                "WHERE split_part(item_serial_code, '-', 2) != %s", (scorable_item,)
+            )
             after = cur.fetchone()[0]
 
     assert after == before, "resolve satu item tidak boleh membuat inspection untuk item lain"

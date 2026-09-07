@@ -1,6 +1,3 @@
-"""Menyimpan hasil batch scoring failure ke schema `predictive` -
-`model_run` + `item_prediction` (append-only)."""
-
 from __future__ import annotations
 
 import logging
@@ -58,7 +55,7 @@ def fail_run(run_id: int, error_message: str) -> None:
 
 
 _PREDICTION_COLUMNS = (
-    "run_id", "terminal_serial_code", "host_serial_code",
+    "run_id", "terminal_serial_code", "item_serial_code",
     "p30", "p60", "p90", "p120", "risk_level", "gate_flagged",
     "scored_at", "model_version",
 )
@@ -130,15 +127,15 @@ def record_predictions(
 
 
 def prediction_ids_for_run(run_id: int) -> dict[str, int]:
-    """host_serial_code -> prediction_id untuk satu run."""
+    """item_serial_code -> prediction_id untuk satu run."""
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT host_serial_code, prediction_id FROM predictive.item_prediction WHERE run_id = %s",
+                "SELECT item_serial_code, prediction_id FROM predictive.item_prediction WHERE run_id = %s",
                 (run_id,),
             )
             rows = cur.fetchall()
-    return {host_serial_code: prediction_id for host_serial_code, prediction_id in rows}
+    return {item_serial_code: prediction_id for item_serial_code, prediction_id in rows}
 
 
 def run_and_persist() -> dict:

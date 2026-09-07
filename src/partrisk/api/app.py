@@ -195,9 +195,6 @@ def _stringify_datetimes(row: dict) -> dict:
 
 @inspections_router.post("/inspections", response_model=InspectionResponse)
 def record_inspection(payload: InspectionRequest) -> dict:
-    """Catat satu perbaikan terhadap satu PART, diidentifikasi lewat
-    `host_serial_code`, dan resolve alert OPEN-nya. PART ini WAJIB sedang
-    punya alert OPEN - kalau tidak, request ditolak (409 NO_OPEN_ALERT)."""
     item_id = data_reader.resolve_item_by_host_serial_code(payload.host_serial_code)
     if item_id is None:
         raise PartNotFound(

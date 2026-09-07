@@ -7,7 +7,6 @@ from sklearn.metrics import precision_recall_curve
 
 
 def precision_lower_bound(true_positive: int, alerts: int, confidence: float = 0.95) -> float:
-    """Batas bawah presisi Clopper-Pearson (docs/DECISIONS.md §43)."""
     if alerts <= 0 or true_positive <= 0:
         return 0.0
     return float(_beta.ppf(1.0 - confidence, true_positive, alerts - true_positive + 1))
@@ -20,7 +19,6 @@ def select_threshold(
     min_alerts: int = 30,
     confidence: float = 0.95,
 ) -> dict:
-    """Threshold gerbang produksi - batas bawah presisi + min_alerts (docs/DECISIONS.md §43)."""
     labels = np.asarray(labels).astype(bool)
     scores = np.asarray(scores, dtype=float)
     if labels.sum() == 0:
@@ -189,12 +187,6 @@ def _first_alert_per_cycle(dataset: pd.DataFrame, scores: np.ndarray, threshold:
 
 
 def lifecycle_metrics(dataset: pd.DataFrame, scores: np.ndarray, threshold: float) -> dict:
-    """Precision/recall/lead-time DI TINGKAT LIFECYCLE untuk satu threshold.
-
-    `dataset` wajib punya kolom installation_cycle_id/observation_on/
-    target_failure/failure_onset_on (skema `training_observations()` -
-    persis yang dipakai `train.py::build_dataset()`).
-    """
     per_cycle_failed = dataset.groupby("installation_cycle_id")["target_failure"].any()
     failed_cycles = int(per_cycle_failed.sum())
     total_cycles = int(len(per_cycle_failed))

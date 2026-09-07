@@ -1,5 +1,3 @@
-"""Info siklus fisik operasional - dibaca dari core.data_reader.get_cycles()."""
-
 from __future__ import annotations
 
 import pandas as pd
@@ -19,10 +17,6 @@ class ItemNotInstalled(LookupError):
 
 
 class CycleMissingHostSerialCode(RuntimeError):
-    """host_serial_code kosong pada event INSTALLED PART ini - dibutuhkan
-    sebagai identitas cycle (docs/DECISIONS.md §38), jadi kegagalan ini
-    ditolak keras, bukan diam-diam pakai fallback."""
-
     def __init__(self, item_id: str) -> None:
         self.item_id = item_id
         super().__init__(

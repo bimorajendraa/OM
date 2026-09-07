@@ -1,16 +1,15 @@
-CREATE TABLE IF NOT EXISTS predictive.inspection (
+CREATE TABLE IF NOT EXISTS predictive.inspection_history (
     inspection_id BIGSERIAL PRIMARY KEY,
 
-    item_id TEXT NOT NULL,
-    host_serial_code TEXT NOT NULL,
+    item_serial_code TEXT NOT NULL,
     inspection_seq INTEGER NOT NULL,
 
     alert_id BIGINT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    UNIQUE (host_serial_code, inspection_seq)
+    UNIQUE (item_serial_code, inspection_seq)
 );
 
-CREATE INDEX IF NOT EXISTS ix_inspection_item ON predictive.inspection (item_id);
-CREATE INDEX IF NOT EXISTS ix_inspection_host_serial_code ON predictive.inspection (host_serial_code);
+CREATE INDEX IF NOT EXISTS ix_inspection_history_item_serial_code
+    ON predictive.inspection_history (item_serial_code);

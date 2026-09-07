@@ -52,12 +52,14 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
   terminal_serial_code  -- serial code FISIK terminal (frame["terminal_label"]),
                          -- BUKAN ID internal terminal_inventory_item_id yang
                          -- dipakai live/filtering di serving/batch.py (§30)
-  host_serial_code NOT NULL   -- serial code FISIK part (§35) - satu-satunya
-                               -- identitas PART di tabel ini sejak §40;
-                               -- item_id DIBUANG (§40) - append-only + join
-                               -- ke prediction_id cuma sesaat setelah
-                               -- scoring, host_serial_code sudah cukup.
-                               -- NOT NULL konsisten DB+Python+API sejak §41.
+  item_serial_code NOT NULL   -- serial code FISIK part (§35, SEBELUMNYA
+                               -- host_serial_code - rename, arti TIDAK
+                               -- berubah) - satu-satunya identitas PART di
+                               -- tabel ini sejak §40; item_id DIBUANG (§40) -
+                               -- append-only + join ke prediction_id cuma
+                               -- sesaat setelah scoring, item_serial_code
+                               -- sudah cukup. NOT NULL konsisten DB+Python+
+                               -- API sejak §41.
   p30, p60, p90, p120, risk_level, gate_flagged,
   scored_at, model_version
   PENTING: baris di sini bisa berasal dari model_run yang UJUNGNYA FAILED -
@@ -67,12 +69,16 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
   langsung, bukan view) - konsumen yang butuh "prediksi yang sah" HARUS
   JOIN model_run WHERE status='SUCCEEDED' sendiri di query mereka.
 
-predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, RENAME §31
-  inspection_id, item_id, host_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id),
-  inspection_seq (UNIK per host_serial_code),
+predictive.inspection_history     -- Milestone 4, APPEND-ONLY, DIPANGKAS §28,
+                                   -- RENAME §31, RENAME TABEL+KOLOM (dari
+                                   -- inspection/host_serial_code) + item_id
+                                   -- DIBUANG (keputusan user)
+  inspection_id, item_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id;
+                                              SEBELUMNYA host_serial_code),
+  inspection_seq (UNIK per item_serial_code),
   alert_id (nullable),
   created_at
-  UNIQUE(host_serial_code, inspection_seq)
+  UNIQUE(item_serial_code, inspection_seq)
   -- Sengaja TIDAK ADA outcome/action_code/remark (dibuang §28) - body
   -- POST /api/v1/inspections cuma host_serial_code, tidak ada apa pun lain
   -- untuk diisi ke kolom itu.
@@ -81,28 +87,34 @@ predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, R
   -- resolve_by_item()); retry tanpa idempotency key sekarang menghasilkan
   -- baris inspection baru, atau 409 NO_OPEN_ALERT kalau alertnya sudah
   -- keburu di-resolve permintaan sebelumnya.
-  -- host_serial_code BUKAN FK (tabel item_cycle dihapus §30) - lihat "Cycle" di
+  -- item_id DIBUANG (keputusan user) - identitas stabil PART sekarang
+  -- DIDERIVE dari bagian tengah item_serial_code (format MODEL-PAIRING-
+  -- REPAIRSEQ) lewat alerts.py::_pairing_code(), bukan kolom fisik.
+  -- item_serial_code BUKAN FK (tabel item_cycle dihapus §30) - lihat "Cycle" di
   -- bawah untuk cara cycle dibaca sekarang.
 
 predictive.alert                                                  -- Milestone 5
   alert_id, terminal_serial_code (serial code fisik terminal, sama seperti
   item_prediction, lihat §30),
-  item_id NOT NULL   -- DIPERTAHANKAN sengaja (§40) - satu-satunya nilai
-                      -- stabil lintas perbaikan, dibutuhkan
-                      -- open_alerts_by_item() supaya tetap bisa menemukan
-                      -- alert OPEN suatu item walau host_serial_code-nya
-                      -- sudah berubah sejak alert dibuka.
-  host_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id),
+  item_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id; SEBELUMNYA
+                              host_serial_code),
   inspection_seq (seq yang AKAN dipakai inspection yang menyelesaikan alert ini),
   prediction_id -> item_prediction (nullable, UNIQUE - §32),
   opened_at, opened_score, status (OPEN/RESOLVED - §33),
   resolved_at, suppression_until,   -- resolution_reason DIBUANG §40
   created_at, updated_at
-  partial UNIQUE(item_id) WHERE status='OPEN'   -- diperketat §41, dulu
-  (item_id, host_serial_code, inspection_seq) - satu PHYSICAL ITEM
-  (item_id) tidak boleh punya lebih dari SATU alert OPEN, titik, terlepas
-  dari cycle/host_serial_code-nya. Ditegakkan constraint database, bukan
-  cuma urutan pemanggilan auto_resolve_closed_cycles() di kode.
+  -- item_id DIBUANG (keputusan user) - kolom fisik terpisah tidak ada lagi.
+  -- Constraint "satu physical item maksimal satu alert OPEN" (diperketat
+  -- §41) sekarang ditegakkan lewat UNIQUE INDEX BERBASIS EKSPRESI:
+  --   ux_alert_one_open_per_item
+  --     ON alert (split_part(item_serial_code, '-', 2)) WHERE status='OPEN'
+  -- split_part(...,'-',2) = item_pairing_code (bagian tengah format MODEL-
+  -- PAIRING-REPAIRSEQ) - identitas PART yang stabil lintas perbaikan/cycle,
+  -- walau item_serial_code-nya berubah. Diverifikasi aman terhadap data
+  -- nyata (2026-09-07, 192.969 baris journal): item_pairing_code selalu
+  -- ada, tidak pernah mengandung '-', item_serial_code selalu persis 3
+  -- bagian. Ditegakkan constraint database, bukan cuma urutan pemanggilan
+  -- auto_resolve_closed_cycles() di kode.
 ```
 
 Sengaja TIDAK ADA tabel `alert_event` (event-sourcing audit log terpisah) -
@@ -126,10 +138,11 @@ read-only, tidak bisa dikunci) sudah tergantikan Postgres **advisory
 lock** (`cycles.py::lock_item()`, `pg_advisory_xact_lock(hashtext(item_id))`)
 yang tidak butuh baris/tabel sama sekali.
 
-Konsekuensi: `inspection.host_serial_code`/`alert.host_serial_code`
-(dulu kolom terpisah `cycle_id`, digabung §38/§40) sekarang TEXT biasa,
-bukan lagi FK ke tabel lokal - integritasnya dijamin oleh kode (selalu
-diisi dari `ensure_active_cycle()`), bukan constraint database.
+Konsekuensi: `inspection_history.item_serial_code`/`alert.item_serial_code`
+(dulu kolom terpisah `cycle_id`, digabung §38/§40; keduanya SEBELUMNYA
+bernama `host_serial_code`) sekarang TEXT biasa, bukan lagi FK ke tabel
+lokal - integritasnya dijamin oleh kode (selalu diisi dari
+`ensure_active_cycle()`), bukan constraint database.
 
 **Identitas cycle = `host_serial_code`** (§38, sejak 2026-09-04) - BUKAN
 lagi `"<item_id>:<urutan>"`. `get_cycles()` tetap menghitung
@@ -170,9 +183,9 @@ tidak bisa saling tabrak nomor urut.
   score-and-persist`), TIDAK PERNAH dari jalur baca live. Langkah pertama:
   `auto_resolve_closed_cycles()` (di bawah) menyapu alert OPEN yang basi
   sebelum membuka alert baru. Lalu per PART yang `gate_flagged`: baca cycle
-  aktif -> lewati kalau sudah ada alert OPEN untuk episode yang sama
-  (`item_id`+`host_serial_code`+`inspection_seq` berikutnya) -> lewati kalau masih
-  dalam masa suppression (KECUALI emergency override) -> INSERT alert.
+  aktif -> lewati kalau item (pairing code, lihat catatan `alert` di atas)
+  ini sudah punya alert OPEN -> lewati kalau masih dalam masa suppression
+  (KECUALI emergency override) -> INSERT alert.
 - `open_alerts_by_item()` - MURNI BACA, dipakai `auto_resolve_closed_cycles()`
   dan `resolve_by_item()` (§28/§29) untuk mencari alert OPEN milik satu/
   beberapa item. Tidak pernah menulis apa pun. (Sebelum §29: juga dipakai
@@ -216,8 +229,10 @@ tidak bisa saling tabrak nomor urut.
   `AlertCycleMismatch` mentah) supaya caller tahu alert sudah selesai,
   bukan error yang tidak jelas maknanya.
 
-**Identitas alert** = `(item_id, host_serial_code, inspection_seq)`, BUKAN cuma
-`item_id` (docs §16). `inspection_seq` pada alert SAMA DENGAN seq yang
+**Identitas alert** = `(item_id, item_serial_code, inspection_seq)` secara
+konsep, BUKAN cuma `item_id` (docs §16) - `item_id` di sini DIDERIVE dari
+`item_serial_code` (`_pairing_code()`), bukan kolom fisik. `inspection_seq`
+pada alert SAMA DENGAN seq yang
 akan didapat inspection yang menyelesaikannya - invariant ini yang
 membuat re-alert otomatis jadi ALERT_ID BARU (episode inspection_seq
 yang lebih tinggi), bukan membuka ulang baris lama.
