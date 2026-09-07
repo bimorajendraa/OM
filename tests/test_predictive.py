@@ -630,68 +630,39 @@ def test_resolve_by_item_dengan_alert_open_meresolve_alert(
 
 
 @needs_database
-def test_resolve_by_item_tanpa_alert_open_tetap_mencatat_inspection(
-    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
+def test_resolve_by_item_tanpa_alert_open_ditolak(
+    scorable_item, scorable_item_host_serial_code
 ):
-    """docs/DECISIONS.md §25/§28: satu POST tetap berarti ada perbaikan
-    walau item ini tidak sedang punya alert OPEN - inspection tetap
-    dicatat, cuma tidak ada alert yang ikut ditutup."""
-    cleanup_item_lifecycle.append(scorable_item)
+    """Keputusan user: endpoint ini HANYA untuk merespons alert yang sudah
+    dibuka model - item tanpa alert OPEN harus ditolak (`NoOpenAlert`),
+    bukan diam-diam dicatat sebagai inspection berdiri sendiri (SUPERSEDED
+    dari docs/DECISIONS.md §25)."""
+    with pytest.raises(alert_engine.NoOpenAlert) as excinfo:
+        alert_engine.resolve_by_item(scorable_item, scorable_item_host_serial_code)
 
-    result = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code
-    )
-
-    assert result["alert"] is None
-    assert result["inspection"]["item_id"] == scorable_item
-    assert result["inspection"]["alert_id"] is None
+    assert excinfo.value.item_id == scorable_item
 
 
 @needs_database
 @needs_models
-def test_resolve_by_item_dengan_idempotency_key_sama_tidak_duplikat(
-    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
+def test_resolve_by_item_dua_episode_alert_berturutan_hasilkan_dua_inspection(
+    scorable_item, scorable_item_host_serial_code, cleanup_alert_lifecycle
 ):
-    """Retry aplikasi eksternal (mis. setelah timeout) memakai
-    idempotency_key yang sama - harus mengembalikan inspection yang SAMA,
-    bukan membuat baris baru."""
-    cleanup_item_lifecycle.append(scorable_item)
-    idempotency_key = f"retry-test-{scorable_item}-{pd.Timestamp.now().value}"
+    """Dua episode alert berturutan pada item yang sama (buka -> resolve ->
+    re-alert -> resolve) masing-masing harus menghasilkan baris inspection
+    SENDIRI - resolve tidak boleh menelan/menggabungkan episode yang
+    berbeda. Alert kedua sengaja diberi skor jauh lebih tinggi supaya
+    menembus suppression lewat emergency override (§24)."""
+    cleanup_alert_lifecycle.append(scorable_item)
+    scored_at = pd.Timestamp.now(tz="UTC")
 
-    first = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, idempotency_key
-    )
-    second = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, idempotency_key
-    )
+    opened_a = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
+    assert len(opened_a) == 1
+    first = alert_engine.resolve_by_item(scorable_item, scorable_item_host_serial_code)
 
-    assert first["inspection"]["inspection_id"] == second["inspection"]["inspection_id"]
-
-    with predictive_db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM predictive.inspection WHERE idempotency_key = %s",
-                (idempotency_key,),
-            )
-            count = cur.fetchone()[0]
-    assert count == 1, "idempotency_key yang sama dikirim ulang tidak boleh membuat baris kedua"
-
-
-@needs_database
-@needs_models
-def test_resolve_by_item_dengan_idempotency_key_berbeda_tetap_dua_inspection(
-    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
-):
-    """idempotency_key BERBEDA berarti perbaikan BERBEDA - keduanya harus
-    tercatat, idempotency tidak boleh menelan inspection yang sah."""
-    cleanup_item_lifecycle.append(scorable_item)
-
-    first = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, f"evt-a-{scorable_item}"
-    )
-    second = alert_engine.resolve_by_item(
-        scorable_item, scorable_item_host_serial_code, f"evt-b-{scorable_item}"
-    )
+    opened_b = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.95), scored_at)
+    assert len(opened_b) == 1, "skor jauh lebih tinggi harus menembus suppression (emergency override)"
+    second = alert_engine.resolve_by_item(scorable_item, scorable_item_host_serial_code)
 
     assert first["inspection"]["inspection_id"] != second["inspection"]["inspection_id"]
 
@@ -699,10 +670,13 @@ def test_resolve_by_item_dengan_idempotency_key_berbeda_tetap_dua_inspection(
 @needs_database
 @needs_models
 def test_resolve_by_item_host_serial_code_current_berhasil(
-    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
+    scorable_item, scorable_item_host_serial_code, cleanup_alert_lifecycle
 ):
     """Kasus 1 - host_serial_code CURRENT (cycle aktif) berhasil resolve."""
-    cleanup_item_lifecycle.append(scorable_item)
+    cleanup_alert_lifecycle.append(scorable_item)
+    scored_at = pd.Timestamp.now(tz="UTC")
+    opened_ids = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
+    assert len(opened_ids) == 1
 
     result = alert_engine.resolve_by_item(
         scorable_item, scorable_item_host_serial_code
@@ -731,11 +705,14 @@ def test_resolve_by_item_host_serial_code_historis_ditolak(scorable_item):
 @needs_database
 @needs_models
 def test_resolve_by_item_host_serial_code_current_tidak_pengaruhi_item_lain(
-    scorable_item, scorable_item_host_serial_code, cleanup_item_lifecycle
+    scorable_item, scorable_item_host_serial_code, cleanup_alert_lifecycle
 ):
     """Kasus 4 - resolve satu item dengan host_serial_code current TIDAK
     memengaruhi item lain (item lain tidak ikut punya inspection baru)."""
-    cleanup_item_lifecycle.append(scorable_item)
+    cleanup_alert_lifecycle.append(scorable_item)
+    scored_at = pd.Timestamp.now(tz="UTC")
+    opened_ids = alert_engine.evaluate_and_open(_flagged_frame(scorable_item, 0.5), scored_at)
+    assert len(opened_ids) == 1
 
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:

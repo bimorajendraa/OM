@@ -70,18 +70,17 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
 predictive.inspection             -- Milestone 4, APPEND-ONLY, DIPANGKAS §28, RENAME §31
   inspection_id, item_id, host_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id),
   inspection_seq (UNIK per host_serial_code),
-  alert_id (nullable), idempotency_key (nullable, UNIK - §37,
-                        SEBELUMNYA external_event_id - rename, arti TIDAK berubah),
+  alert_id (nullable),
   created_at
   UNIQUE(host_serial_code, inspection_seq)
-  UNIQUE(idempotency_key)
   -- Sengaja TIDAK ADA outcome/action_code/remark (dibuang §28) - body
-  -- POST /api/v1/inspections cuma host_serial_code + external_event_id
-  -- opsional, tidak ada apa pun lain untuk diisi ke kolom itu.
-  -- external_event_id (§37) - idempotency key OPSIONAL dari aplikasi
-  -- pemanggil, dipakai mencegah inspection duplikat kalau request di-retry
-  -- (mis. timeout). NULL diperbolehkan berkali-kali (Postgres UNIQUE tidak
-  -- membatasi NULL berulang).
+  -- POST /api/v1/inspections cuma host_serial_code, tidak ada apa pun lain
+  -- untuk diisi ke kolom itu.
+  -- idempotency_key (SEBELUMNYA external_event_id, §37) DIHAPUS - keputusan
+  -- user setelah endpoint diwajibkan cuma boleh merespons alert OPEN (lihat
+  -- resolve_by_item()); retry tanpa idempotency key sekarang menghasilkan
+  -- baris inspection baru, atau 409 NO_OPEN_ALERT kalau alertnya sudah
+  -- keburu di-resolve permintaan sebelumnya.
   -- host_serial_code BUKAN FK (tabel item_cycle dihapus §30) - lihat "Cycle" di
   -- bawah untuk cara cycle dibaca sekarang.
 
@@ -191,7 +190,7 @@ tidak bisa saling tabrak nomor urut.
   bulanan) DAN `python -m partrisk.cli resolve-closed-alerts` (murah,
   boleh dijadwalkan lebih sering - mis. harian - karena tidak perlu skor
   ulang armada).
-- `resolve_by_item(item_id, host_serial_code, idempotency_key)` (docs §28,
+- `resolve_by_item(item_id, host_serial_code)` (docs §28,
   validasi host_serial_code §41) - **titik masuk** endpoint
   `POST /api/v1/inspections` (body `host_serial_code`, diresolve ke
   `item_id` lewat `core.data_reader.resolve_item_by_host_serial_code()`).
@@ -200,10 +199,10 @@ tidak bisa saling tabrak nomor urut.
   kalau tidak, raise `HostSerialNotCurrent` (HTTP 409
   `HOST_SERIAL_NOT_CURRENT`) supaya serial code LAMA (dari sebelum
   perbaikan terakhir) tidak bisa dipakai meresolve alert cycle BARU yang
-  tidak ada hubungannya. Kalau item ini SEDANG punya alert OPEN, delegasi
-  ke `resolve_with_inspection()`; kalau tidak, tetap catat inspection
-  tanpa alert (satu POST tetap berarti ada perbaikan, §25).
-- `resolve_with_inspection(alert_id, idempotency_key)` (§31, SEBELUMNYA
+  tidak ada hubungannya. Item WAJIB SEDANG punya alert OPEN (keputusan
+  user, SUPERSEDED dari §25) - kalau tidak, raise `NoOpenAlert` (HTTP 409
+  `NO_OPEN_ALERT`); kalau ada, delegasi ke `resolve_with_inspection()`.
+- `resolve_with_inspection(alert_id)` (§31, SEBELUMNYA
   `resolve_with_intervention` - rename istilah, arti TIDAK berubah) - jalur
   resolve **MANUAL** yang sesungguhnya, untuk perbaikan kecil yang TIDAK
   PERNAH tercatat di data operasional (mis. mengencangkan baut - item tetap

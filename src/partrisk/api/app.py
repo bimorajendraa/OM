@@ -196,8 +196,8 @@ def _stringify_datetimes(row: dict) -> dict:
 @inspections_router.post("/inspections", response_model=InspectionResponse)
 def record_inspection(payload: InspectionRequest) -> dict:
     """Catat satu perbaikan terhadap satu PART, diidentifikasi lewat
-    `host_serial_code`. Kalau PART ini sedang punya alert OPEN, alert itu
-    ikut di-RESOLVE; kalau tidak, inspection tetap dicatat tanpa alert."""
+    `host_serial_code`, dan resolve alert OPEN-nya. PART ini WAJIB sedang
+    punya alert OPEN - kalau tidak, request ditolak (409 NO_OPEN_ALERT)."""
     item_id = data_reader.resolve_item_by_host_serial_code(payload.host_serial_code)
     if item_id is None:
         raise PartNotFound(
@@ -205,7 +205,7 @@ def record_inspection(payload: InspectionRequest) -> dict:
             message=f"PART dengan serial code '{payload.host_serial_code}' tidak ditemukan.",
         )
     result = alert_engine.resolve_by_item(
-        item_id, payload.host_serial_code, payload.idempotency_key
+        item_id, payload.host_serial_code
     )
     return {
         "inspection": _stringify_datetimes(result["inspection"]),
@@ -214,9 +214,7 @@ def record_inspection(payload: InspectionRequest) -> dict:
 
 
 DESCRIPTION = """
-API predictive maintenance - satu-satunya endpoint publik adalah
-`POST /api/v1/inspections`. Tidak ada endpoint GET - aplikasi eksternal
-baca schema `predictive` langsung dari database.
+API predictive maintenance.
 """
 
 
@@ -285,6 +283,14 @@ async def handle_alert_not_open(request: Request, error: alert_engine.AlertNotOp
     return JSONResponse(
         status_code=409,
         content={"status": "ALERT_NOT_OPEN", "message": str(error)},
+    )
+
+
+@app.exception_handler(alert_engine.NoOpenAlert)
+async def handle_no_open_alert(request: Request, error: alert_engine.NoOpenAlert) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"status": "NO_OPEN_ALERT", "item_id": error.item_id, "message": str(error)},
     )
 
 

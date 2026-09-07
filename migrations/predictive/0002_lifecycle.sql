@@ -6,12 +6,10 @@ CREATE TABLE IF NOT EXISTS predictive.inspection (
     inspection_seq INTEGER NOT NULL,
 
     alert_id BIGINT,
-    idempotency_key TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    UNIQUE (host_serial_code, inspection_seq),
-    CONSTRAINT ux_inspection_idempotency_key UNIQUE (idempotency_key)
+    UNIQUE (host_serial_code, inspection_seq)
 );
 
 CREATE INDEX IF NOT EXISTS ix_inspection_item ON predictive.inspection (item_id);

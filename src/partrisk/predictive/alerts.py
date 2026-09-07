@@ -51,6 +51,16 @@ class HostSerialNotCurrent(ValueError):
         )
 
 
+class NoOpenAlert(LookupError):
+    """Item tidak sedang punya alert OPEN - `POST /api/v1/inspections`
+    HANYA boleh dipakai untuk merespons alert yang sudah dibuka model,
+    bukan untuk mencatat perbaikan di luar itu (keputusan user)."""
+
+    def __init__(self, item_id: str) -> None:
+        self.item_id = item_id
+        super().__init__(f"Item {item_id!r} tidak sedang punya alert OPEN.")
+
+
 class AlertCycleMismatch(ValueError):
     """Item sudah pindah cycle sejak alert ini dibuka (cycle diidentifikasi
     lewat host_serial_code - docs/DECISIONS.md §38)."""
@@ -188,32 +198,23 @@ def _emergency_override(current_score: float, previous_score: float | None) -> b
 def resolve_by_item(
     item_id: str,
     host_serial_code: str,
-    idempotency_key: str | None = None,
 ) -> dict:
-    """Jalur MANUAL diidentifikasi lewat item (bukan alert_id).
-    `host_serial_code` harus cycle AKTIF item ini sekarang - raise
-    `HostSerialNotCurrent` kalau caller pakai serial code lama
-    (docs/DECISIONS.md §41). `idempotency_key` opsional - retry
-    idempotent, lihat docs/CODE_NOTES.md."""
-    if idempotency_key is not None:
-        existing = inspections.find_by_idempotency_key(idempotency_key)
-        if existing is not None:
-            alert = get_alert(existing["alert_id"]) if existing["alert_id"] is not None else None
-            return {"inspection": existing, "alert": alert}
-
+    """Jalur MANUAL diidentifikasi lewat item (bukan alert_id). Item WAJIB
+    sedang punya alert OPEN - raise `NoOpenAlert` kalau tidak (keputusan
+    user: endpoint ini cuma untuk merespons alert, bukan mencatat perbaikan
+    di luar itu). `host_serial_code` harus cycle AKTIF item ini sekarang -
+    raise `HostSerialNotCurrent` kalau caller pakai serial code lama
+    (docs/DECISIONS.md §41)."""
     current_cycle = cycle_store.ensure_active_cycle(item_id)
     if current_cycle["cycle_id"] != host_serial_code:
         raise HostSerialNotCurrent(item_id, host_serial_code, current_cycle["cycle_id"])
 
     alert = open_alerts_by_item([item_id]).get(item_id)
-    if alert is not None:
-        result = resolve_with_inspection(alert["alert_id"], idempotency_key)
-        return {"inspection": result["inspection"], "alert": result["alert"]}
+    if alert is None:
+        raise NoOpenAlert(item_id)
 
-    inspection_row = inspections.record_inspection(
-        item_id, idempotency_key=idempotency_key
-    )
-    return {"inspection": inspection_row, "alert": None}
+    result = resolve_with_inspection(alert["alert_id"])
+    return {"inspection": result["inspection"], "alert": result["alert"]}
 
 
 def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]:
@@ -283,9 +284,7 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
     return opened_ids
 
 
-def resolve_with_inspection(
-    alert_id: int, idempotency_key: str | None = None
-) -> dict:
+def resolve_with_inspection(alert_id: int) -> dict:
     """Jalur MANUAL untuk mematikan alert."""
     alert = get_alert(alert_id)
     if alert is None:
@@ -311,24 +310,6 @@ def resolve_with_inspection(
             row = cur.fetchone()
             if row is None:
                 raise AlertNotFound(alert_id)
-
-            if idempotency_key is not None:
-                cur.execute(
-                    f"SELECT {inspections._SELECT_COLUMNS} FROM predictive.inspection "
-                    "WHERE idempotency_key = %s",
-                    (idempotency_key,),
-                )
-                existing_inspection = cur.fetchone()
-                if existing_inspection is not None:
-                    inspection_row = inspections._row_to_dict(existing_inspection)
-                    cur.execute(
-                        f"SELECT {_ALERT_SELECT_COLUMNS} FROM predictive.alert WHERE alert_id = %s",
-                        (alert_id,),
-                    )
-                    alert_row = _row_to_alert(cur.fetchone())
-                    conn.commit()
-                    return {"inspection": inspection_row, "alert": alert_row}
-
             if row[0] != "OPEN":
                 raise AlertNotOpen(alert_id, row[0])
 
@@ -338,11 +319,11 @@ def resolve_with_inspection(
             cur.execute(
                 f"""
                 INSERT INTO predictive.inspection
-                    (item_id, host_serial_code, inspection_seq, alert_id, idempotency_key)
-                VALUES (%s, %s, %s, %s, %s)
+                    (item_id, host_serial_code, inspection_seq, alert_id)
+                VALUES (%s, %s, %s, %s)
                 RETURNING {inspections._SELECT_COLUMNS}
                 """,
-                (alert["item_id"], alert["host_serial_code"], next_seq, alert_id, idempotency_key),
+                (alert["item_id"], alert["host_serial_code"], next_seq, alert_id),
             )
             inspection_row = inspections._row_to_dict(cur.fetchone())
 

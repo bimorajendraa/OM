@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 _CONFIG = ConfigDict(protected_namespaces=(), extra="allow")
 
@@ -37,25 +37,6 @@ class InspectionRequest(BaseModel):
     host_serial_code: str = Field(
         description="Label fisik PART (format MODEL-PAIRINGCODE-REPAIRSEQ)."
     )
-    idempotency_key: str | None = Field(
-        default=None,
-        description=(
-            "Kunci retry-safety dari aplikasi pemanggil (opsional) - kirim ulang "
-            "request dengan nilai yang SAMA dianggap request yang sama dan tidak "
-            "akan membuat inspection kedua."
-        ),
-    )
-
-    @field_validator("idempotency_key")
-    @classmethod
-    def _blank_is_none(cls, value: str | None) -> str | None:
-        """String kosong/whitespace dianggap "tidak ada kunci" - kalau tidak,
-        dua request tak terkait yang sama-sama kirim "" akan salah dianggap
-        idempotent terhadap satu sama lain (lihat inspections.find_by_idempotency_key)."""
-        if value is None:
-            return None
-        value = value.strip()
-        return value or None
 
 
 class InspectionResult(BaseModel):
@@ -66,7 +47,6 @@ class InspectionResult(BaseModel):
     host_serial_code: str
     inspection_seq: int
     alert_id: int | None
-    idempotency_key: str | None
     created_at: str
 
 
