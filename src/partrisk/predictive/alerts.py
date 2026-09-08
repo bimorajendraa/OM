@@ -242,6 +242,7 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
 
     flagged = frame.loc[frame["work_queue_tier"] == "CONFIRMED"]
     opened_ids: list[int] = []
+    error_count = 0
 
     with db.connect() as conn:
         for _, row in flagged.iterrows():
@@ -259,43 +260,58 @@ def evaluate_and_open(frame: pd.DataFrame, scored_at: pd.Timestamp) -> list[int]
             prediction_id = row.get("prediction_id")
             prediction_id = None if pd.isna(prediction_id) else int(prediction_id)
 
-            with conn.cursor() as cur:
-                cycle_store.lock_item(cur, item_id)
-                next_seq = _next_inspection_seq(cur, item_serial_code)
+            try:
+                with conn.cursor() as cur:
+                    cycle_store.lock_item(cur, item_id)
+                    next_seq = _next_inspection_seq(cur, item_serial_code)
 
-                cur.execute(
-                    "SELECT 1 FROM predictive.alert "
-                    "WHERE split_part(item_serial_code, '-', 2) = %s AND status = 'OPEN'",
-                    (item_id,),
-                )
-                if cur.fetchone() is not None:
-                    conn.commit()
-                    continue
-
-                suppression = _active_suppression(cur, item_serial_code)
-                if suppression is not None:
-                    _, previous_score = suppression
-                    if not _emergency_override(score, previous_score):
+                    cur.execute(
+                        "SELECT 1 FROM predictive.alert "
+                        "WHERE split_part(item_serial_code, '-', 2) = %s AND status = 'OPEN'",
+                        (item_id,),
+                    )
+                    if cur.fetchone() is not None:
                         conn.commit()
                         continue
 
-                cur.execute(
-                    """
-                    INSERT INTO predictive.alert
-                        (terminal_serial_code, item_serial_code,
-                         inspection_seq, prediction_id, opened_at, opened_score, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'OPEN')
-                    RETURNING alert_id
-                    """,
-                    (
-                        terminal_serial_code, item_serial_code,
-                        next_seq, prediction_id, scored_at.to_pydatetime(), score,
-                    ),
+                    suppression = _active_suppression(cur, item_serial_code)
+                    if suppression is not None:
+                        _, previous_score = suppression
+                        if not _emergency_override(score, previous_score):
+                            conn.commit()
+                            continue
+
+                    cur.execute(
+                        """
+                        INSERT INTO predictive.alert
+                            (terminal_serial_code, item_serial_code,
+                             inspection_seq, prediction_id, opened_at, opened_score, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'OPEN')
+                        RETURNING alert_id
+                        """,
+                        (
+                            terminal_serial_code, item_serial_code,
+                            next_seq, prediction_id, scored_at.to_pydatetime(), score,
+                        ),
+                    )
+                    alert_id = cur.fetchone()[0]
+                conn.commit()
+            except Exception:  # noqa: BLE001
+                conn.rollback()
+                error_count += 1
+                logger.exception(
+                    "Gagal evaluasi alert untuk item_id=%s - item ini dilewati, "
+                    "evaluasi tetap lanjut ke item lain.", item_id,
                 )
-                alert_id = cur.fetchone()[0]
-            conn.commit()
+                continue
 
             opened_ids.append(alert_id)
+
+    if error_count:
+        logger.error(
+            "%d item gagal dievaluasi alertnya pada run ini (lihat log di atas) - "
+            "item lain tetap berhasil dievaluasi.", error_count,
+        )
 
     return opened_ids
 

@@ -46,6 +46,11 @@ def set_current_version(model_version: str) -> None:
                 "UPDATE predictive.model_artifact SET is_current = true WHERE model_version = %s",
                 (model_version,),
             )
+            if cur.rowcount == 0:
+                raise ValueError(
+                    f"Model version {model_version!r} tidak ditemukan di predictive.model_artifact "
+                    "- current TIDAK diubah."
+                )
         conn.commit()
 
 
