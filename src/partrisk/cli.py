@@ -8,6 +8,7 @@ import statistics
 import time
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 import psutil
@@ -22,6 +23,7 @@ from partrisk.serving import single as serving
 from partrisk.serving import batch as serving_batch
 from partrisk.engines.failure import train as training_failure
 from partrisk.engines.failure import gate
+from partrisk.predictive import model_store
 from partrisk.predictive import scoring as predictive_scoring
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -91,6 +93,52 @@ def _resolve_closed_alerts_main() -> int:
     _resolve_closed_alerts_logger.info(
         "alert_resolved=%d selesai dalam %.1f detik: %s",
         len(resolved_ids), time.time() - started, resolved_ids,
+    )
+    return 0
+
+
+_import_model_artifacts_logger = logging.getLogger("import-model-artifacts")
+
+
+def _import_model_artifacts_main() -> int:
+    """Migrasi satu kali models/failure/v*/ -> predictive.model_artifact."""
+    existing = set(model_store.list_versions())
+    candidates = sorted(
+        (
+            path for path in config.FAILURE_MODEL_DIR.glob("v*")
+            if path.is_dir() and (path / "metadata.json").exists()
+        ),
+        key=lambda path: int(path.name[1:]),
+    )
+    if not candidates:
+        _import_model_artifacts_logger.info("tidak ada versi di %s untuk dimigrasikan", config.FAILURE_MODEL_DIR)
+        return 0
+
+    imported = 0
+    for directory in candidates:
+        version = directory.name
+        if version in existing:
+            _import_model_artifacts_logger.info("%s sudah ada di database, dilewati", version)
+            continue
+
+        model = CatBoostClassifier()
+        model.load_model(str(directory / "model.cbm"))
+        calibrator = joblib.load(directory / "calibrator.joblib")
+        fleet = pd.read_csv(directory / "fleet_snapshot.csv", dtype={"item_model_code_clean": str})
+        metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+
+        model_store.save_version(version, model, calibrator, fleet, metadata)
+        imported += 1
+        _import_model_artifacts_logger.info("%s dimigrasikan ke database", version)
+
+    pointer = config.FAILURE_MODEL_DIR / "CURRENT"
+    if pointer.exists():
+        current = pointer.read_text(encoding="utf-8").strip()
+        model_store.set_current_version(current)
+        _import_model_artifacts_logger.info("is_current diset ke %s", current)
+
+    _import_model_artifacts_logger.info(
+        "selesai: %d versi baru dimigrasikan, %d sudah ada sebelumnya", imported, len(candidates) - imported
     )
     return 0
 
@@ -256,11 +304,7 @@ def _baseline_performance_main() -> int:
     print(f"      RSS setelah load model: {rss_after_load:.1f} MB")
 
     print("\n[2/4] Ukuran artifact model failure...")
-    failure_dir = config.FAILURE_MODEL_DIR / metadata["model_version"]
-    total_bytes = sum(f.stat().st_size for f in failure_dir.glob("*") if f.is_file())
-    for f in sorted(failure_dir.glob("*")):
-        if f.is_file():
-            print(f"      {f.name}: {f.stat().st_size / 1e6:.3f} MB")
+    total_bytes = model_store.artifact_size_bytes(metadata["model_version"])
     print(f"      TOTAL: {total_bytes / 1e6:.3f} MB")
 
     print("\n[3/4] Single predict() p50 (20 PART aktif)...")
@@ -469,12 +513,8 @@ def _rolling_backtest_main() -> int:
         training_failure.build_dataset()
     )
 
-    v3_metadata = json.loads(
-        (config.FAILURE_MODEL_DIR / "v3" / "metadata.json").read_text(encoding="utf-8")
-    )
-    v4_metadata = json.loads(
-        (config.FAILURE_MODEL_DIR / "v4" / "metadata.json").read_text(encoding="utf-8")
-    )
+    _, _, v3_metadata = model_store.load_version("v3")
+    _, _, v4_metadata = model_store.load_version("v4")
     v3_name = f"v3 ({len(v3_metadata['features'])} fitur)"
     v4_name = f"v4 ({len(v4_metadata['features'])} fitur)"
     variants = {v3_name: v3_metadata["features"], v4_name: v4_metadata["features"]}
@@ -746,6 +786,12 @@ def main() -> int:
         "(mis. harian) daripada score-and-persist (docs/DECISIONS.md §34).",
     )
 
+    sub.add_parser(
+        "import-model-artifacts",
+        help="Migrasi satu kali: pindahkan semua versi model kerusakan dari "
+        "models/failure/v*/ ke predictive.model_artifact.",
+    )
+
     p_golden = sub.add_parser(
         "golden-batch",
         help="Oracle golden batch (generate/compare).",
@@ -787,6 +833,8 @@ def main() -> int:
         return _score_and_persist_main()
     if args.command == "resolve-closed-alerts":
         return _resolve_closed_alerts_main()
+    if args.command == "import-model-artifacts":
+        return _import_model_artifacts_main()
     if args.command == "golden-batch":
         return _golden_batch_main(args)
     if args.command == "baseline-performance":

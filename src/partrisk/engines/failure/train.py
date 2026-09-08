@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, Pool
@@ -19,6 +17,7 @@ from partrisk.core import config
 from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
 from partrisk.engines.failure import gate
+from partrisk.predictive import model_store
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -52,23 +51,6 @@ def cross_fitted_calibration(
     final_calibrator = IsotonicRegression(out_of_bounds="clip")
     final_calibrator.fit(raw, y)
     return out_of_fold, final_calibrator
-
-
-def next_version(model_dir: Path) -> str:
-    existing = [
-        int(path.name[1:])
-        for path in model_dir.glob("v*")
-        if path.is_dir() and path.name[1:].isdigit()
-    ]
-    return f"v{max(existing, default=0) + 1}"
-
-
-def current_version(model_dir: Path) -> str | None:
-    pointer = model_dir / "CURRENT"
-    if not pointer.exists():
-        return None
-    version = pointer.read_text(encoding="utf-8").strip()
-    return version if (model_dir / version / "metadata.json").exists() else None
 
 
 def capacity_metrics(
@@ -166,7 +148,6 @@ def print_promotion_comparison(
 
 
 TRAIN, VALIDATION, TEST = "TRAIN", "VALIDATION", "TEST"
-CURRENT_POINTER = config.FAILURE_MODEL_DIR / "CURRENT"
 
 
 def assign_split(
@@ -282,11 +263,7 @@ def train_model(dataset: pd.DataFrame, features: pd.DataFrame) -> tuple:
 
 
 def evaluate_incumbent(previous_version: str, dataset: pd.DataFrame, split: str = TEST) -> dict:
-    metadata = load_metadata(previous_version)
-    directory = config.FAILURE_MODEL_DIR / previous_version
-    model = CatBoostClassifier()
-    model.load_model(str(directory / "model.cbm"))
-    calibrator = joblib.load(directory / "calibrator.joblib")
+    model, calibrator, metadata = model_store.load_version(previous_version)
 
     test_dataset = dataset.loc[dataset["split"].eq(split)]
     incumbent_support = feature_builder.part_model_support(
@@ -408,11 +385,6 @@ def compute_gate(
     return result
 
 
-def load_metadata(version: str) -> dict:
-    path = config.FAILURE_MODEL_DIR / version / "metadata.json"
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
 def save_version(
     version: str,
     model: CatBoostClassifier,
@@ -427,14 +399,6 @@ def save_version(
     promotion_comparison: dict,
     gate_metadata: dict,
 ) -> dict:
-    directory = config.FAILURE_MODEL_DIR / version
-    directory.mkdir(parents=True, exist_ok=True)
-
-    model.save_model(str(directory / "model.cbm"))
-    joblib.dump(calibrator, directory / "calibrator.joblib")
-
-    fleet.to_csv(directory / "fleet_snapshot.csv", index=False)
-
     observed = pd.to_datetime(dataset["observation_on"])
     validation = metrics["validation"]
     metadata = {
@@ -462,9 +426,7 @@ def save_version(
         "promotion_comparison": promotion_comparison,
         "gate": gate_metadata,
     }
-    atomic_write_text(
-        directory / "metadata.json", json.dumps(metadata, indent=2, ensure_ascii=False)
-    )
+    model_store.save_version(version, model, calibrator, fleet, metadata)
     return metadata
 
 
@@ -477,7 +439,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    config.FAILURE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     dataset, features, support_totals, data_end, events, cycles, episodes = build_dataset()
     model, calibrator, metrics, raw_test, _val_oof = train_model(dataset, features)
     fleet = feature_builder.fleet_snapshot(cycles, episodes, data_end)
@@ -543,7 +504,7 @@ def main() -> int:
         test_dataset=test_dataset,
     )
 
-    previous = current_version(config.FAILURE_MODEL_DIR)
+    previous = model_store.current_version()
     incumbent_metrics = None
     validation_incumbent_metrics = None
     if previous is not None:
@@ -571,10 +532,10 @@ def main() -> int:
         ),
     }
 
-    version = next_version(config.FAILURE_MODEL_DIR)
+    version = model_store.next_version()
     save_version(version, model, calibrator, metrics, support_totals, dataset,
                  data_end, cutoffs, cutoff_basis, fleet, comparison, gate_metadata)
-    print(f"      Tersimpan sebagai {version} di {config.FAILURE_MODEL_DIR / version}")
+    print(f"      Tersimpan sebagai {version} di predictive.model_artifact")
     if gate_metadata["feasible"]:
         test_gate = gate_metadata["test_metrics"]
         print(
@@ -595,15 +556,14 @@ def main() -> int:
     )
 
     if promote:
-        atomic_write_text(CURRENT_POINTER, version)
+        model_store.set_current_version(version)
         print(f"\n[OK] {version} dipakai sebagai model production ({reason}).")
     else:
         print(
             f"\n[TAHAN] Model production TETAP {previous} - {reason}.\n"
             f"        {version} tetap tersimpan untuk dibandingkan. Untuk tetap "
             f"memakainya: python -m partrisk.engines.failure.train --force-promote, "
-            f"atau tulis '{version}' "
-            f"ke {CURRENT_POINTER}."
+            f"atau panggil model_store.set_current_version('{version}')."
         )
     return 0
 

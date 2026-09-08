@@ -3,13 +3,12 @@ from __future__ import annotations
 import json
 import sys
 
-import joblib
-import pandas as pd
 from catboost import CatBoostClassifier
 
 from partrisk.core import config
 from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
+from partrisk.predictive import model_store
 
 
 def risk_level(probability: float, cutoffs: dict[str, float]) -> str:
@@ -43,11 +42,8 @@ def _fleet_snapshot(data_end):
         return _FLEET
 
     _, _, metadata = _load_failure_model()
-    directory = config.FAILURE_MODEL_DIR / metadata["model_version"]
-    stored = directory / "fleet_snapshot.csv"
-    if stored.exists() and metadata.get("fleet_snapshot_at") == str(data_end):
-
-        snapshot = pd.read_csv(stored, dtype={"item_model_code_clean": str})
+    if metadata.get("fleet_snapshot_at") == str(data_end):
+        snapshot = model_store.load_fleet_snapshot(metadata["model_version"])
         if _covers_known_models(snapshot, metadata):
             _FLEET = snapshot
             return _FLEET
@@ -76,18 +72,13 @@ def _load_failure_model() -> tuple[CatBoostClassifier, object, dict]:
     if _LOADED_FAILURE is not None:
         return _LOADED_FAILURE
 
-    pointer = config.FAILURE_MODEL_DIR / "CURRENT"
-    if not pointer.exists():
+    version = model_store.current_version()
+    if version is None:
         raise FileNotFoundError(
-            f"Belum ada model kerusakan di {config.FAILURE_MODEL_DIR}. "
-            "Jalankan dulu: python train.py"
+            "Belum ada model kerusakan dengan is_current=true di predictive.model_artifact. "
+            "Jalankan dulu: python -m partrisk.engines.failure.train"
         )
-    directory = config.FAILURE_MODEL_DIR / pointer.read_text(encoding="utf-8").strip()
-
-    model = CatBoostClassifier()
-    model.load_model(str(directory / "model.cbm"))
-    calibrator = joblib.load(directory / "calibrator.joblib")
-    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+    model, calibrator, metadata = model_store.load_version(version)
     _LOADED_FAILURE = (model, calibrator, metadata)
     return _LOADED_FAILURE
 

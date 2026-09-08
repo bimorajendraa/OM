@@ -13,6 +13,7 @@ from partrisk.core import features as feature_builder
 from partrisk.engines import predict as failure_model
 from partrisk.engines.failure import train
 from partrisk.engines.failure import train as training_utils
+from partrisk.predictive import model_store
 from tests.conftest import needs_database, needs_models
 
 
@@ -642,8 +643,10 @@ def test_evaluate_incumbent_menghasilkan_skor_valid():
     if eligible["split"].eq(train.TEST).sum() == 0:
         pytest.skip("tidak ada baris test split untuk diuji")
 
-    if not (config.FAILURE_MODEL_DIR / "v1" / "metadata.json").exists():
-        pytest.skip("model v1 tidak ada di repo ini")
+    try:
+        model_store.load_version("v1")
+    except FileNotFoundError:
+        pytest.skip("model v1 tidak ada di database")
 
     result = train.evaluate_incumbent("v1", eligible)
     assert result["model_version"] == "v1"
