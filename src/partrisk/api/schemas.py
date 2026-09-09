@@ -34,22 +34,18 @@ class InspectionResult(BaseModel):
     inspection_id: int
     item_serial_code: str
     inspection_seq: int
-    alert_id: int | None
+    prediction_id: int
     created_at: str
 
 
 class AlertResult(BaseModel):
     model_config = _CONFIG
 
-    alert_id: int
+    prediction_id: int
     terminal_serial_code: str | None
     item_serial_code: str
-    inspection_seq: int
-    status: Literal["OPEN", "RESOLVED"]
-    opened_at: str
-    opened_score: float
-    resolved_at: str | None
-    suppression_until: str | None
+    p30: float
+    scored_at: str
 
 
 class InspectionResponse(BaseModel):

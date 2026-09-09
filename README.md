@@ -61,8 +61,11 @@ Dokumentasi interaktif: <http://127.0.0.1:8000/docs>
 
 Tidak ada endpoint GET untuk data prediksi/rekomendasi - satu-satunya
 endpoint publik adalah `POST /api/v1/inspections`. Aplikasi eksternal yang butuh baca prediksi/alert langsung
-baca schema `predictive` dari database - `item_prediction`/`alert` punya
-kolom `host_serial_code`/`terminal_serial_code` untuk join lintas schema.
+baca schema `predictive` dari database - tidak ada tabel `alert` terpisah,
+sinyalnya ada di `item_prediction.alert_flagged` (baris TERBARU per
+`item_serial_code` yang belum punya pasangan di `inspection_history`
+berarti masih "OPEN"). Kolom `item_serial_code`/`terminal_serial_code`
+dipakai untuk join lintas schema.
 
 ### 4. Docker
 
@@ -146,8 +149,10 @@ src/partrisk/
 │   ├── db.py                   koneksi tulis schema `predictive` + migration runner
 │   ├── scoring.py               model_run + item_prediction (append-only) - `score-and-persist`
 │   ├── cycles.py                 baca cycle LANGSUNG dari data operasional (tanpa tabel mirror) + advisory lock per item_id
-│   ├── inspections.py            catat tindakan teknisi - inspection_seq DALAM cycle aktif
-│   └── alerts.py                 alert persisten: buka (scheduled scoring), baca (live), resolve (inspection manual atau auto lewat cycle tertutup)
+│   ├── inspections.py            bentuk baris inspection_history (dipakai bersama alerts.py)
+│   └── alerts.py                 tidak ada tabel alert terpisah - baca (item_prediction.alert_flagged
+│                                  + anti-join inspection_history), resolve (inspection manual atau
+│                                  auto lewat cycle tertutup, keduanya nulis inspection_history)
 ├── api/
 │   ├── app.py                  FastAPI: /health + POST /api/v1/inspections saja
 │   └── schemas.py               bentuk request/response API

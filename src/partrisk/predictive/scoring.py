@@ -4,6 +4,7 @@ import logging
 
 import pandas as pd
 
+from partrisk.predictive import alerts as alert_engine
 from partrisk.predictive import db
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ def fail_run(run_id: int, error_message: str) -> None:
 
 _PREDICTION_COLUMNS = (
     "run_id", "terminal_serial_code", "item_serial_code",
-    "p30", "p60", "p90", "p120", "risk_level", "gate_flagged",
+    "p30", "p60", "p90", "p120", "risk_level", "gate_flagged", "alert_flagged",
     "scored_at", "model_version",
 )
 
@@ -93,27 +94,35 @@ def record_predictions(
     model_version: str,
     scored_at: pd.Timestamp,
 ) -> int:
-    """Tulis satu baris `item_prediction` per PART di `frame`. APPEND-ONLY."""
+    """Tulis satu baris `item_prediction` per PART di `frame`. APPEND-ONLY.
+
+    `alert_flagged` (gate_flagged DAN tidak sedang di-suppress, lihat
+    `alerts.py::compute_alert_flagged()`) dihitung DI DALAM transaksi yang
+    sama dengan INSERT ini - satu-satunya titik di mana sebuah prediction
+    "menjadi alert", menggantikan langkah `evaluate_and_open()` terpisah
+    yang dulu ada."""
     _check_scores_before_persist(frame)
-    rows = [
-        (
-            run_id,
-            None if pd.isna(row.get("terminal_label")) else str(row["terminal_label"]),
-            str(row["host_serial_code"]),
-            float(row["failure_probability_30d"]),
-            float(row["failure_probability_60d"]),
-            float(row["failure_probability_90d"]),
-            float(row["failure_probability_120d"]),
-            row["failure_risk_level"],
-            bool(row["gate_flagged"]),
-            scored_at.to_pydatetime(),
-            model_version,
-        )
-        for _, row in frame.iterrows()
-    ]
 
     with db.connect() as conn:
         with conn.cursor() as cur:
+            alert_flagged = alert_engine.compute_alert_flagged(cur, frame, scored_at)
+            rows = [
+                (
+                    run_id,
+                    None if pd.isna(row.get("terminal_label")) else str(row["terminal_label"]),
+                    str(row["host_serial_code"]),
+                    float(row["failure_probability_30d"]),
+                    float(row["failure_probability_60d"]),
+                    float(row["failure_probability_90d"]),
+                    float(row["failure_probability_120d"]),
+                    row["failure_risk_level"],
+                    bool(row["gate_flagged"]),
+                    bool(alert_flagged.loc[idx]),
+                    scored_at.to_pydatetime(),
+                    model_version,
+                )
+                for idx, row in frame.iterrows()
+            ]
             cur.executemany(
                 f"""
                 INSERT INTO predictive.item_prediction
@@ -126,42 +135,41 @@ def record_predictions(
     return len(rows)
 
 
-def prediction_ids_for_run(run_id: int) -> dict[str, int]:
-    """item_serial_code -> prediction_id untuk satu run."""
-    with db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT item_serial_code, prediction_id FROM predictive.item_prediction WHERE run_id = %s",
-                (run_id,),
-            )
-            rows = cur.fetchall()
-    return {item_serial_code: prediction_id for item_serial_code, prediction_id in rows}
-
-
 def run_and_persist() -> dict:
-    """Satu siklus scoring: skor seluruh PART aktif, simpan sebagai
-    model_run + item_prediction baru, lalu evaluasi alert."""
-    from partrisk.predictive import alerts as alert_engine
+    """Satu siklus scoring: tutup alert yang cycle-nya sudah berakhir,
+    skor seluruh PART aktif, simpan sebagai model_run + item_prediction
+    baru (`alert_flagged` dihitung sekaligus saat insert, lihat
+    `record_predictions()`)."""
     from partrisk.serving import batch as serving_batch
 
     model_version = None
     run_id = None
-    opened_alert_ids: list[int] = []
+    flagged_prediction_ids: list[int] = []
     try:
+        alert_engine.auto_resolve_closed_cycles()
+
         scores = serving_batch.score_active_parts(force_refresh=True)
         model_version = scores.model_version["failure"]
         run_id = start_run(model_version)
         scored_at = pd.Timestamp.now(tz="UTC")
         row_count = record_predictions(run_id, scores.frame, model_version, scored_at)
 
-        prediction_ids = prediction_ids_for_run(run_id)
-        scores.frame["prediction_id"] = scores.frame["host_serial_code"].map(prediction_ids)
-        opened_alert_ids = alert_engine.evaluate_and_open(scores.frame, scored_at)
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT prediction_id FROM predictive.item_prediction "
+                    "WHERE run_id = %s AND alert_flagged",
+                    (run_id,),
+                )
+                flagged_prediction_ids = [row[0] for row in cur.fetchall()]
 
         complete_run(run_id, row_count)
         logger.info("model_run %s selesai: %d baris disimpan", run_id, row_count)
-        if opened_alert_ids:
-            logger.info("run_id %s membuka %d alert baru: %s", run_id, len(opened_alert_ids), opened_alert_ids)
+        if flagged_prediction_ids:
+            logger.info(
+                "run_id %s: %d prediction jadi alert baru: %s",
+                run_id, len(flagged_prediction_ids), flagged_prediction_ids,
+            )
     except Exception as error:  # noqa: BLE001
         logger.exception("model_run gagal")
         if run_id is not None:
@@ -172,5 +180,5 @@ def run_and_persist() -> dict:
         "run_id": run_id,
         "row_count": row_count,
         "model_version": model_version,
-        "opened_alert_ids": opened_alert_ids,
+        "alert_flagged_prediction_ids": flagged_prediction_ids,
     }

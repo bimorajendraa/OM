@@ -63,66 +63,69 @@ predictive.item_prediction   -- APPEND-ONLY, tidak pernah di-UPDATE/DELETE
   p30, p60, p90, p120, risk_level, gate_flagged,
   scored_at, model_version
   PENTING: baris di sini bisa berasal dari model_run yang UJUNGNYA FAILED -
-  record_predictions() commit SEBELUM evaluate_and_open()/complete_run()
-  selesai (§37). View predictive.valid_item_prediction yang dulu jadi
+  record_predictions() commit SEBELUM complete_run() selesai (§37). View
+  predictive.valid_item_prediction yang dulu jadi
   penyaring ini sudah DIHAPUS (konsumen eksternal ternyata baca tabel ini
   langsung, bukan view) - konsumen yang butuh "prediksi yang sah" HARUS
   JOIN model_run WHERE status='SUCCEEDED' sendiri di query mereka.
 
-predictive.inspection_history     -- Milestone 4, APPEND-ONLY, DIPANGKAS §28,
-                                   -- RENAME §31, RENAME TABEL+KOLOM (dari
-                                   -- inspection/host_serial_code) + item_id
-                                   -- DIBUANG (keputusan user)
-  inspection_id, item_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id;
+predictive.item_prediction   -- (kolom lain lihat definisi di atas)
+  ...
+  alert_flagged BOOLEAN NOT NULL DEFAULT false   -- Milestone 5, ditambah §53
+  -- Dihitung SEKALI saat INSERT (predictive/scoring.py::record_predictions()
+  -- -> alerts.py::compute_alert_flagged()), TIDAK PERNAH diubah lagi -
+  -- tetap konsisten dengan sifat append-only tabel ini. BEDA dari
+  -- gate_flagged (murni sinyal model, dipakai build_work_queue()/evaluasi
+  -- capacity-precision, TIDAK boleh berubah makna): alert_flagged =
+  -- gate_flagged DAN belum ada alert terbuka yang belum di-inspect untuk
+  -- item_serial_code ini DAN tidak sedang di-suppress (kecuali emergency
+  -- override) - versi "benar-benar perlu ditindak SEKARANG".
+
+predictive.inspection_history     -- APPEND-ONLY, DIGABUNG DARI TABEL ALERT §53
+  inspection_id, item_serial_code NOT NULL (GANTIKAN cycle_id;
                                               SEBELUMNYA host_serial_code),
   inspection_seq (UNIK per item_serial_code),
-  alert_id (nullable),
+  prediction_id NOT NULL, UNIQUE -> item_prediction (§53, SEBELUMNYA
+                                     alert_id nullable -> tabel alert
+                                     yang sekarang sudah dihapus),
   created_at
   UNIQUE(item_serial_code, inspection_seq)
-  -- Sengaja TIDAK ADA outcome/action_code/remark (dibuang §28) - body
-  -- POST /api/v1/inspections cuma host_serial_code, tidak ada apa pun lain
+  -- Satu-satunya catatan "penutupan alert" - baik MANUAL (teknisi lewat
+  -- POST /api/v1/inspections, alerts.py::resolve_with_inspection()) MAUPUN
+  -- OTOMATIS (cycle sudah tertutup di data operasional, alerts.py::
+  -- auto_resolve_closed_cycles() - dulu UPDATE tabel alert, sekarang INSERT
+  -- ke sini juga). "Belum ada baris di sini untuk prediction_id X" berarti
+  -- alert itu masih terbuka - tidak ada kolom outcome/closed_reason yang
+  -- membedakan cara penutupan (sengaja, sama seperti resolution_reason yang
+  -- dulu dibuang dari tabel alert - kalau perlu tahu kenapa, cek silang ke
+  -- data operasional).
+  -- Sengaja TIDAK ADA outcome/action_code/remark - body POST
+  -- /api/v1/inspections cuma host_serial_code, tidak ada apa pun lain
   -- untuk diisi ke kolom itu.
-  -- idempotency_key (SEBELUMNYA external_event_id, §37) DIHAPUS - keputusan
-  -- user setelah endpoint diwajibkan cuma boleh merespons alert OPEN (lihat
-  -- resolve_by_item()); retry tanpa idempotency key sekarang menghasilkan
-  -- baris inspection baru, atau 409 NO_OPEN_ALERT kalau alertnya sudah
-  -- keburu di-resolve permintaan sebelumnya.
   -- item_id DIBUANG (keputusan user) - identitas stabil PART sekarang
   -- DIDERIVE dari bagian tengah item_serial_code (format MODEL-PAIRING-
   -- REPAIRSEQ) lewat alerts.py::_pairing_code(), bukan kolom fisik.
-  -- item_serial_code BUKAN FK (tabel item_cycle dihapus §30) - lihat "Cycle" di
+  -- item_serial_code BUKAN FK (tabel item_cycle dihapus) - lihat "Cycle" di
   -- bawah untuk cara cycle dibaca sekarang.
-
-predictive.alert                                                  -- Milestone 5
-  alert_id, terminal_serial_code (serial code fisik terminal, sama seperti
-  item_prediction, lihat §30),
-  item_serial_code NOT NULL (§38/§40, GANTIKAN cycle_id; SEBELUMNYA
-                              host_serial_code),
-  inspection_seq (seq yang AKAN dipakai inspection yang menyelesaikan alert ini),
-  prediction_id -> item_prediction (nullable, UNIQUE - §32),
-  opened_at, opened_score, status (OPEN/RESOLVED - §33),
-  resolved_at, suppression_until,   -- resolution_reason DIBUANG §40
-  created_at, updated_at
-  -- item_id DIBUANG (keputusan user) - kolom fisik terpisah tidak ada lagi.
-  -- Constraint "satu physical item maksimal satu alert OPEN" (diperketat
-  -- §41) sekarang ditegakkan lewat UNIQUE INDEX BERBASIS EKSPRESI:
-  --   ux_alert_one_open_per_item
-  --     ON alert (split_part(item_serial_code, '-', 2)) WHERE status='OPEN'
-  -- split_part(...,'-',2) = item_pairing_code (bagian tengah format MODEL-
-  -- PAIRING-REPAIRSEQ) - identitas PART yang stabil lintas perbaikan/cycle,
-  -- walau item_serial_code-nya berubah. Diverifikasi aman terhadap data
-  -- nyata (2026-09-07, 192.969 baris journal): item_pairing_code selalu
-  -- ada, tidak pernah mengandung '-', item_serial_code selalu persis 3
-  -- bagian. Ditegakkan constraint database, bukan cuma urutan pemanggilan
-  -- auto_resolve_closed_cycles() di kode.
 ```
 
+**Tabel `predictive.alert` DIHAPUS (§53, 2026-09-08)** - digabung ke
+`item_prediction`(`alert_flagged`) + `inspection_history`(`prediction_id`).
+Alasan: sinyal mentahnya (`gate_flagged`) sudah ada di `item_prediction`,
+jadi status "perlu ditindak" tidak butuh tabel/entitas mutable terpisah -
+cukup satu kolom yang dihitung sekali saat insert (tetap append-only) plus
+anti-join ke `inspection_history` untuk tahu "sudah ditindak atau belum".
+Constraint "satu physical item maksimal satu alert OPEN" yang dulu
+ditegakkan `UNIQUE INDEX` (`ux_alert_one_open_per_item`) sekarang
+ditegakkan di `alerts.py::compute_alert_flagged()` (`_has_open_alert()`) -
+logic aplikasi, bukan lagi constraint database, karena "OPEN" sekarang
+konsep DERIVED (tidak ada kolom status untuk di-constrain).
+
 Sengaja TIDAK ADA tabel `alert_event` (event-sourcing audit log terpisah) -
-SUPERSEDED §28, dibuang karena tidak ada kode yang membacanya (murni
-ditulis) dan informasinya sudah lengkap di kolom `alert.opened_at`/
-`resolved_at`/`status` (`resolution_reason` sendiri sudah dibuang §40 -
-detail kenapa/gimana alert ditutup tidak lagi disimpan, cukup tahu
-`status=RESOLVED`).
+dibuang karena tidak ada kode yang membacanya (murni ditulis) dan
+informasinya sudah lengkap di `item_prediction.scored_at`/`alert_flagged`
++ keberadaan baris `inspection_history` (kenapa/gimana ditutup tidak lagi
+disimpan, cukup tahu "sudah ada baris inspection_history-nya").
 
 ### Cycle - dibaca langsung dari data operasional, TIDAK ADA tabel mirror (§30)
 
@@ -172,78 +175,83 @@ lock_item()`, advisory lock - lihat "Cycle" di atas) selama penghitungan
 `inspection_seq` berikutnya, supaya dua inspection untuk item yang sama
 tidak bisa saling tabrak nomor urut.
 
-### Alert - dipisah tegas: model memutuskan skor, alert engine memutuskan
-### perlu-tidaknya jadi alert, teknisi mencatat tindakan
+### Alert - tidak ada tabel/status terpisah, murni turunan item_prediction + inspection_history
 
-`predictive/alerts.py` - LIMA fungsi, tanggung jawab terpisah:
+`predictive/alerts.py` (§53, ditulis ulang total - lihat "Tabel `predictive.
+alert` DIHAPUS" di atas):
 
-- `evaluate_and_open(frame, scored_at)` - **satu-satunya** yang
-  MEMBUKA alert baru. Dipanggil SEKALI per siklus scheduled scoring
-  (`predictive/scoring.py::run_and_persist()`, lihat `python -m partrisk.cli
-  score-and-persist`), TIDAK PERNAH dari jalur baca live. Langkah pertama:
-  `auto_resolve_closed_cycles()` (di bawah) menyapu alert OPEN yang basi
-  sebelum membuka alert baru. Lalu per PART yang `gate_flagged`: baca cycle
-  aktif -> lewati kalau item (pairing code, lihat catatan `alert` di atas)
-  ini sudah punya alert OPEN -> lewati kalau masih dalam masa suppression
-  (KECUALI emergency override) -> INSERT alert.
-- `open_alerts_by_item()` - MURNI BACA, dipakai `auto_resolve_closed_cycles()`
-  dan `resolve_by_item()` (§28/§29) untuk mencari alert OPEN milik satu/
-  beberapa item. Tidak pernah menulis apa pun. (Sebelum §29: juga dipakai
-  `serving/batch.py` untuk menandai status alert di jalur live API/dashboard -
-  pemakaian itu sudah dibuang bersama endpoint GET-nya.)
-- `auto_resolve_closed_cycles(item_ids=None)` (docs §27) - jalur resolve
+- `compute_alert_flagged(cur, frame, scored_at)` - **satu-satunya** yang
+  MENENTUKAN sebuah prediction "menjadi alert", dipanggil DI DALAM
+  transaksi yang sama dengan INSERT `item_prediction`
+  (`scoring.py::record_predictions()`), TIDAK PERNAH dari jalur baca live.
+  Per baris yang `gate_flagged`: lewati kalau `item_serial_code` ini SUDAH
+  punya prediction `alert_flagged=true` yang belum ada `inspection_history`-
+  nya (`_has_open_alert()` - mencegah alert ditumpuk tiap scoring selama
+  yang lama belum ditindak) -> lewati kalau masih dalam masa suppression
+  (KECUALI emergency override, `_is_suppressed()`) -> `alert_flagged=true`.
+- `open_alerts_by_item(item_ids=None)` - MURNI BACA: prediction
+  `alert_flagged=true` TERBARU per `item_serial_code` yang BELUM ada
+  `inspection_history`-nya (anti-join), dikelompokkan per item_id (pairing
+  code). Kalau (seharusnya tidak pernah lewat jalur normal) ada dua
+  kandidat untuk pairing code yang sama, log error dan pakai yang
+  `scored_at` terbaru. Dipakai `auto_resolve_closed_cycles()` dan
+  `resolve_by_item()`.
+- `auto_resolve_closed_cycles(item_ids=None)` - jalur resolve
   **OTOMATIS**, untuk alert yang episode-nya sudah selesai lewat kejadian
   operasional biasa (worktype corrective/preventive berujung dismantle,
-  dsb - tercatat sistem lewat `journal`, ditutup jadi `cycle_end_reason`
-  oleh §20). Untuk tiap alert OPEN, baca status cycle-nya LANGSUNG dari data
-  operasional (`cycles.py::cycle_status()`, §30); kalau cycle sudah
-  tertutup, UPDATE langsung ke RESOLVED - TANPA inspection row, TANPA
-  panggilan API. Tidak menyentuh alert yang cycle-nya masih aktif. Dipanggil
-  dari DUA jalur (§34): `evaluate_and_open()` (nebeng siklus scoring
-  bulanan) DAN `python -m partrisk.cli resolve-closed-alerts` (murah,
-  boleh dijadwalkan lebih sering - mis. harian - karena tidak perlu skor
-  ulang armada).
-- `resolve_by_item(item_id, host_serial_code)` (docs §28,
-  validasi host_serial_code §41) - **titik masuk** endpoint
-  `POST /api/v1/inspections` (body `host_serial_code`, diresolve ke
-  `item_id` lewat `core.data_reader.resolve_item_by_host_serial_code()`).
-  SEBELUM diproses, `host_serial_code` yang dikirim caller WAJIB cocok
-  cycle AKTIF item ini sekarang (`cycle_store.ensure_active_cycle()`) -
-  kalau tidak, raise `HostSerialNotCurrent` (HTTP 409
-  `HOST_SERIAL_NOT_CURRENT`) supaya serial code LAMA (dari sebelum
-  perbaikan terakhir) tidak bisa dipakai meresolve alert cycle BARU yang
-  tidak ada hubungannya. Item WAJIB SEDANG punya alert OPEN (keputusan
-  user, SUPERSEDED dari §25) - kalau tidak, raise `NoOpenAlert` (HTTP 409
-  `NO_OPEN_ALERT`); kalau ada, delegasi ke `resolve_with_inspection()`.
-- `resolve_with_inspection(alert_id)` (§31, SEBELUMNYA
-  `resolve_with_intervention` - rename istilah, arti TIDAK berubah) - jalur
-  resolve **MANUAL** yang sesungguhnya, untuk perbaikan kecil yang TIDAK
-  PERNAH tercatat di data operasional (mis. mengencangkan baut - item tetap
-  di cycle yang sama). SELALU lewat inspection tercatat (docs §19 master
-  prompt: resolve BUKAN set probability=0 - `item_prediction` historis
-  tidak pernah disentuh, hanya `alert.status` yang berubah). Transaksional
-  penuh (docs §22). Kalau ternyata cycle alert sudah tertutup operasional
-  saat fungsi ini dipanggil (skenario yang seharusnya sudah ditangkap
-  `auto_resolve_closed_cycles()` di §26, tapi belum sempat berjalan),
-  fungsi ini mencoba auto-resolve dulu lalu melempar `AlertNotOpen` (bukan
-  `AlertCycleMismatch` mentah) supaya caller tahu alert sudah selesai,
-  bukan error yang tidak jelas maknanya.
+  dsb - tercatat sistem lewat `journal`, ditutup jadi `cycle_end_reason`).
+  Untuk tiap alert OPEN, baca status cycle-nya LANGSUNG dari data
+  operasional (`cycles.py::cycle_status()`); kalau cycle sudah tertutup,
+  INSERT `inspection_history` (bukan UPDATE status lagi, tabelnya sudah
+  tidak ada) - TANPA inspeksi asli, TANPA panggilan API
+  (`ON CONFLICT (prediction_id) DO NOTHING` menjaga idempoten kalau ada
+  race). Tidak menyentuh alert yang cycle-nya masih aktif. Dipanggil dari
+  DUA jalur: `scoring.py::run_and_persist()` (SEBELUM scoring baru, supaya
+  cycle lama yang sudah tertutup tidak salah dianggap masih terbuka) DAN
+  `python -m partrisk.cli resolve-closed-alerts` (murah, boleh dijadwalkan
+  lebih sering - mis. harian - karena tidak perlu skor ulang armada).
+- `resolve_by_item(item_id, host_serial_code)` (validasi host_serial_code
+  di bawah) - **titik masuk** endpoint `POST /api/v1/inspections` (body
+  `host_serial_code`, diresolve ke `item_id` lewat
+  `core.data_reader.resolve_item_by_host_serial_code()`). SEBELUM
+  diproses, `host_serial_code` yang dikirim caller WAJIB cocok cycle AKTIF
+  item ini sekarang (`cycle_store.ensure_active_cycle()`) - kalau tidak,
+  raise `HostSerialNotCurrent` (HTTP 409 `HOST_SERIAL_NOT_CURRENT`) supaya
+  serial code LAMA (dari sebelum perbaikan terakhir) tidak bisa dipakai
+  meresolve alert cycle BARU yang tidak ada hubungannya. Item WAJIB
+  SEDANG punya alert OPEN (keputusan user) - kalau tidak, raise
+  `NoOpenAlert` (HTTP 409 `NO_OPEN_ALERT`); kalau ada, delegasi ke
+  `resolve_with_inspection()`.
+- `resolve_with_inspection(prediction_id)` - jalur resolve **MANUAL** yang
+  sesungguhnya, untuk perbaikan kecil yang TIDAK PERNAH tercatat di data
+  operasional (mis. mengencangkan baut - item tetap di cycle yang sama).
+  SELALU lewat inspection tercatat (resolve BUKAN set probability=0 -
+  `item_prediction` historis tidak pernah disentuh, hanya keberadaan baris
+  `inspection_history` yang berubah). Transaksional penuh. Kalau ternyata
+  cycle alert sudah tertutup operasional saat fungsi ini dipanggil
+  (skenario yang seharusnya sudah ditangkap `auto_resolve_closed_cycles()`,
+  tapi belum sempat berjalan), fungsi ini mencoba auto-resolve dulu lalu
+  melempar `AlertNotOpen` (bukan `AlertCycleMismatch` mentah) supaya
+  caller tahu alert sudah selesai, bukan error yang tidak jelas maknanya.
 
 **Identitas alert** = `(item_id, item_serial_code, inspection_seq)` secara
-konsep, BUKAN cuma `item_id` (docs §16) - `item_id` di sini DIDERIVE dari
+konsep, BUKAN cuma `item_id` - `item_id` di sini DIDERIVE dari
 `item_serial_code` (`_pairing_code()`), bukan kolom fisik. `inspection_seq`
-pada alert SAMA DENGAN seq yang
-akan didapat inspection yang menyelesaikannya - invariant ini yang
-membuat re-alert otomatis jadi ALERT_ID BARU (episode inspection_seq
-yang lebih tinggi), bukan membuka ulang baris lama.
+untuk inspection yang menyelesaikan alert dihitung SAAT resolve
+(`_next_inspection_seq()`), bukan lagi direservasi di muka saat alert
+dibuka (tidak perlu lagi sejak tidak ada kolom `alert.inspection_seq`
+terpisah) - invariant "re-alert = baris/episode baru, bukan buka ulang
+yang lama" sekarang datang dari `prediction_id` yang selalu baru per
+episode.
 
-**Suppression & emergency override** (docs §24/§25): `ALERT_SUPPRESSION_DAYS`,
+**Suppression & emergency override**: `ALERT_SUPPRESSION_DAYS`,
 `ALERT_EMERGENCY_SCORE_JUMP`, `ALERT_EMERGENCY_SCORE_ABSOLUTE` di
-`core/config.py` - nilai PLACEHOLDER awal (lihat WHY di sana), belum
-divalidasi data resolve/re-alert nyata karena datanya belum ada sama
-sekali sebelum Milestone 5 ini berjalan. Emergency override membandingkan
-skor SEKARANG terhadap `opened_score` alert yang terakhir di-resolve untuk
-item+cycle yang sama (bukan terhadap `suppression_until`).
+`core/config.py` - nilai PLACEHOLDER awal, belum divalidasi data
+resolve/re-alert nyata. Emergency override membandingkan skor SEKARANG
+terhadap `p30` prediction yang ditutup oleh baris `inspection_history`
+TERAKHIR untuk `item_serial_code` yang sama (`alerts.py::_last_closure()`) -
+bukan terhadap kolom `suppression_until` tersimpan (sudah tidak ada,
+dihitung on-the-fly dari `inspection_history.created_at + ALERT_SUPPRESSION_DAYS`).
 
 ## Menulis prediksi (scheduled scoring)
 
@@ -251,9 +259,12 @@ item+cycle yang sama (bukan terhadap `suppression_until`).
 python -m partrisk.cli score-and-persist
 ```
 
-Satu siklus: skor seluruh PART aktif (`serving.batch.score_active_parts
-(force_refresh=True)`), simpan sebagai satu `model_run` baru + satu baris
-`item_prediction` per PART. **Dipanggil scheduler eksternal secara berkala**
+Satu siklus: tutup alert yang cycle-nya sudah berakhir
+(`alerts.py::auto_resolve_closed_cycles()`), skor seluruh PART aktif
+(`serving.batch.score_active_parts(force_refresh=True)`), simpan sebagai
+satu `model_run` baru + satu baris `item_prediction` per PART
+(`alert_flagged` ikut dihitung di langkah INSERT yang sama - lihat bagian
+"Alert" di atas). **Dipanggil scheduler eksternal secara berkala**
 (cron/Task Scheduler) - satu-satunya jalur yang menulis riwayat prediksi.
 Sengaja TERPISAH dari pemanggilan `score_active_parts()` lain (CLI
 `predict`, `golden-batch`, test) - jalur-jalur itu tidak ikut menulis

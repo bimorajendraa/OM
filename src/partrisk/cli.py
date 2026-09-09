@@ -73,7 +73,7 @@ def _score_and_persist_main() -> int:
     _score_persist_logger.info(
         "run_id=%s model_version=%s row_count=%d alert_baru=%d selesai dalam %.1f detik",
         result["run_id"], result["model_version"], result["row_count"],
-        len(result["opened_alert_ids"]), time.time() - started,
+        len(result["alert_flagged_prediction_ids"]), time.time() - started,
     )
     return 0
 

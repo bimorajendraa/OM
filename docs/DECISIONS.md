@@ -3009,3 +3009,107 @@ signifikan menggabungkan seluruh FASE 3.
 seperti sebelum retrain, nol baru). `pytest -q` penuh setelah revert -
 exit code 0, `test_current_batch_matches_golden_baseline` HIJAU (v6
 tidak terdampak).
+
+## 53 · Tabel `alert` dihapus - digabung ke `item_prediction.alert_flagged` + `inspection_history.prediction_id`
+
+**Status**: berlaku, 2026-09-08. Permintaan eksplisit user setelah diskusi
+beberapa putaran (lihat "Kenapa bukan alternatif lain" di bawah untuk dua
+opsi yang dipertimbangkan dan ditolak).
+
+**Masalah/motivasi**: `predictive.alert` menyimpan status (OPEN/RESOLVED),
+`opened_at`/`opened_score`, `resolved_at`, `suppression_until` sebagai
+entitas MUTABLE terpisah dari `item_prediction`. Tapi sinyal mentahnya
+(`gate_flagged`, dan probabilitas `p30`) sudah ada di `item_prediction`
+sejak baris itu di-INSERT - `opened_at`/`opened_score`/
+`terminal_serial_code` di `alert` semuanya CUMA SALINAN dari
+`scored_at`/`p30`/`terminal_serial_code` milik `item_prediction` yang
+memicunya. Tabel terpisah untuk "status" ini menambah satu lapis
+sinkronisasi (dan satu constraint DB, `ux_alert_one_open_per_item`) yang
+sebetulnya bisa didapat cukup dari 1 kolom baru + baca `inspection_history`.
+
+**Keputusan**: `alert` DIHAPUS.
+- `item_prediction` dapat SATU kolom baru: `alert_flagged BOOLEAN NOT NULL
+  DEFAULT false`. Dihitung SEKALI saat INSERT
+  (`scoring.py::record_predictions()` -> `alerts.py::
+  compute_alert_flagged()`), TIDAK PERNAH diubah lagi setelahnya - tetap
+  konsisten dengan sifat append-only tabel ini. Nilainya = `gate_flagged`
+  DAN belum ada alert terbuka yang belum di-inspect untuk
+  `item_serial_code` ini (`_has_open_alert()`) DAN tidak sedang
+  di-suppress kecuali emergency override (`_is_suppressed()`).
+- `inspection_history.alert_id` (nullable, -> tabel `alert`) diganti jadi
+  `prediction_id` (NOT NULL, UNIQUE, -> `item_prediction`). Satu-satunya
+  cara "menutup" sebuah alert sekarang INSERT ke `inspection_history` -
+  baik MANUAL (`resolve_with_inspection()`, lewat API) MAUPUN OTOMATIS
+  (`auto_resolve_closed_cycles()`, cycle operasional sudah tertutup -
+  dulu UPDATE `alert.status`, sekarang INSERT ke sini juga, pakai
+  `ON CONFLICT (prediction_id) DO NOTHING` untuk tetap idempoten).
+- "Item X sedang punya alert terbuka?" jadi QUERY (`open_alerts_by_item()`):
+  prediction `alert_flagged=true` TERBARU per `item_serial_code` yang
+  BELUM ada baris `inspection_history`-nya (anti-join) - bukan lagi baca
+  kolom `status`.
+- Constraint "satu physical item maksimal satu alert OPEN"
+  (`ux_alert_one_open_per_item`, §41) pindah dari constraint DATABASE
+  jadi LOGIC APLIKASI (`_has_open_alert()` di `compute_alert_flagged()`) -
+  karena tidak ada lagi kolom `status` yang bisa di-`UNIQUE INDEX ...
+  WHERE status='OPEN'`. `open_alerts_by_item()` tetap punya fallback
+  deteksi-dan-log kalau anomali ini tetap terjadi (race, insert manual) -
+  pakai yang `scored_at` terbaru, bukan crash.
+- TIDAK ADA kolom `closed_reason`/`outcome` baru di `inspection_history`
+  untuk membedakan "ditutup manual" vs "ditutup otomatis" - konsisten
+  dengan §40 (kolom serupa, `resolution_reason`, sudah sengaja dibuang
+  dari `alert`). Kalau nanti perlu tahu alasan penutupan, itu bisa dicek
+  silang ke data operasional (status cycle), bukan tanggung jawab tabel
+  predictive.
+
+**Kenapa bukan alternatif lain** (dipertimbangkan lalu ditolak dalam
+diskusi ini):
+1. *Full-derived* (tidak ada kolom `alert_flagged` sama sekali, murni
+   `gate_flagged` + query suppression di setiap tempat yang butuh tahu
+   "perlu ditindak sekarang") - ditolak karena logika suppression/
+   emergency-override jadi harus di-reimplementasi oleh SIAPA PUN yang
+   query, termasuk aplikasi eksternal yang selama ini cukup `WHERE
+   status='OPEN'` (README: mereka baca schema `predictive` langsung).
+   Membocorkan business logic ke luar partrisk dianggap risiko lebih
+   besar daripada satu kolom tambahan.
+2. *`is_current`-style single boolean tanpa cek "sudah open belum"* -
+   draft awal `compute_alert_flagged()` HANYA cek suppression, LUPA cek
+   "apakah item ini sudah punya alert_flagged=true yang belum
+   di-inspect" - ditemukan sendiri saat menulis test regresi
+   (`test_alert_flagged_tidak_true_lagi_selama_masih_open`): tanpa
+   `_has_open_alert()`, item yang gate-nya tetap true berbulan-bulan
+   tanpa pernah diinspeksi akan menumpuk alert BARU tiap scoring,
+   bukan tertahan seperti perilaku `evaluate_and_open()` yang lama.
+   Diperbaiki sebelum kode ini pernah jalan di production.
+
+**Migrasi data**: `migrations/predictive/0003_merge_alert.sql`. DB live
+saat migrasi ini ditulis cuma punya 4 baris `alert` + 3 baris
+`inspection_history`, SEMUANYA data sintetis dari simulasi sesi
+pengembangan (2 di antaranya malah `prediction_id NULL` - tidak bisa
+di-backfill konsisten ke skema baru yang mewajibkan NOT NULL) - migrasi
+men-TRUNCATE kedua tabel itu, bukan backfill, karena tidak ada histori
+produksi asli yang hilang. `migrate()` proyek ini re-run SEMUA file tiap
+kali dipanggil (tanpa tabel tracking) - `TRUNCATE ... alert` dibungkus
+`DO $$ IF EXISTS ... $$` supaya aman dipanggil ulang setelah `alert`
+di-DROP (percobaan pertama gagal disadari sebelum diterapkan ke DB,
+diperbaiki sebelum migrasi benar-benar dijalankan).
+
+**File yang berubah**: `alerts.py` (ditulis ulang total - `evaluate_and_open()`
+DIHAPUS, fungsinya pindah ke `compute_alert_flagged()` yang dipanggil DI
+DALAM `record_predictions()`), `scoring.py` (`record_predictions()`
+menghitung `alert_flagged` sebelum INSERT; `run_and_persist()` panggil
+`auto_resolve_closed_cycles()` di awal, bukan `evaluate_and_open()` di
+akhir; `prediction_ids_for_run()` dibuang - sudah tidak perlu, linkage
+prediction_id sekarang implisit lewat kolom di baris yang sama),
+`inspections.py` (dipangkas jadi cuma bentuk baris - fungsi publik
+`record_inspection()` dibuang, sudah dead code dan tidak kompatibel
+dengan `prediction_id NOT NULL`), `api/schemas.py` (`AlertResult`/
+`InspectionResult` ganti field mengikuti kolom yang sekarang ada -
+`alert_id`->`prediction_id`, `opened_at`/`opened_score`->`scored_at`/`p30`,
+`status`/`suppression_until` dibuang karena implicit/tidak lagi tersimpan).
+
+**Verifikasi**: `python -m partrisk.predictive.db migrate`, simulasi ulang
+siklus penuh (buka alert lewat scoring -> resolve lewat API -> cek
+`open_alerts_by_item` kosong -> time-skip suppression -> re-alert lewat
+scoring berikutnya), simulasi cycle ditutup ->
+`resolve-closed-alerts` menutup tanpa lewat API, `pytest tests/
+test_predictive.py tests/test_api.py -q` lalu `pytest -q` penuh.
