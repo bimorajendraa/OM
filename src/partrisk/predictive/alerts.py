@@ -1,11 +1,3 @@
-"""Alert lifecycle - TIDAK ADA tabel `alert` terpisah (dihapus, digabung ke
-`item_prediction`/`inspection_history` - lihat docs/DATABASE.md). Sinyal
-"perlu ditindak" adalah `item_prediction.alert_flagged` (dihitung sekali
-saat scoring, lihat `compute_alert_flagged()`); "sudah ditindak" adalah
-keberadaan baris `inspection_history` yang mereferensikan `prediction_id`
-itu (baik lewat inspeksi manual maupun auto-resolve cycle tertutup).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -88,14 +80,20 @@ def _row_to_alert(row) -> dict:
     return dict(zip(_ALERT_COLUMNS, row))
 
 
+def _run_succeeded(table_ref: str = "item_prediction") -> str:
+    return (
+        f"EXISTS (SELECT 1 FROM predictive.model_run mr "
+        f"WHERE mr.run_id = {table_ref}.run_id AND mr.status = 'SUCCEEDED')"
+    )
+
+
 def get_alert(prediction_id: int) -> dict | None:
-    """Baca satu prediction sebagai 'alert' - HANYA valid kalau
-    alert_flagged. Murni baca."""
+   
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT {_ALERT_SELECT_COLUMNS} FROM predictive.item_prediction "
-                "WHERE prediction_id = %s AND alert_flagged",
+                f"WHERE prediction_id = %s AND alert_flagged AND {_run_succeeded()}",
                 (prediction_id,),
             )
             row = cur.fetchone()
@@ -103,13 +101,12 @@ def get_alert(prediction_id: int) -> dict | None:
 
 
 def open_alerts_by_item(item_ids: list[str] | None = None) -> dict[str, dict]:
-    """Baca prediction `alert_flagged=true` TERBARU per item_serial_code
-    yang BELUM ada baris `inspection_history`-nya, dikelompokkan per item_id
-    (pairing code - identitas stabil lintas cycle). Murni baca."""
+    
     query = f"""
         SELECT DISTINCT ON (item_serial_code) {_ALERT_SELECT_COLUMNS}
         FROM predictive.item_prediction
         WHERE alert_flagged
+          AND {_run_succeeded()}
           AND NOT EXISTS (
               SELECT 1 FROM predictive.inspection_history
               WHERE inspection_history.prediction_id = item_prediction.prediction_id
@@ -155,9 +152,6 @@ def _next_inspection_seq(cur, item_serial_code: str) -> int:
 
 
 def _last_closure(cur, item_serial_code: str) -> tuple[pd.Timestamp, float] | None:
-    """Baris `inspection_history` TERAKHIR (manual maupun auto-resolve)
-    untuk `item_serial_code` ini, beserta skor prediction yang ditutupnya -
-    dipakai untuk suppression window + emergency override."""
     cur.execute(
         """
         SELECT ih.created_at, ip.p30
@@ -195,14 +189,11 @@ def _is_suppressed(cur, item_serial_code: str, current_score: float, scored_at: 
 
 
 def _has_open_alert(cur, item_serial_code: str) -> bool:
-    """True kalau item_serial_code ini SUDAH punya prediction
-    alert_flagged=true yang belum ada baris inspection_history-nya -
-    mencegah alert baru ditumpuk tiap scoring selama yang lama belum
-    di-inspect (docs §41, sekarang dicek di sini, bukan constraint DB)."""
     cur.execute(
-        """
+        f"""
         SELECT 1 FROM predictive.item_prediction ip
         WHERE ip.item_serial_code = %s AND ip.alert_flagged
+          AND {_run_succeeded("ip")}
           AND NOT EXISTS (
               SELECT 1 FROM predictive.inspection_history ih
               WHERE ih.prediction_id = ip.prediction_id
@@ -215,21 +206,15 @@ def _has_open_alert(cur, item_serial_code: str) -> bool:
 
 
 def compute_alert_flagged(cur, frame: pd.DataFrame, scored_at: pd.Timestamp) -> pd.Series:
-    """Untuk tiap baris `frame` (butuh kolom `host_serial_code`,
-    `gate_flagged`, `failure_probability_30d`), hitung apakah baris ini
-    benar-benar perlu jadi alert SEKARANG: `gate_flagged` DAN belum ada
-    alert terbuka yang belum di-inspect untuk item_serial_code ini DAN
-    tidak sedang di-suppress (kecuali emergency override). Dipanggil di
-    dalam transaksi yang sama dengan INSERT `item_prediction`
-    (`scoring.py::record_predictions()`), SEBELUM baris itu commit - jadi
-    baca `item_prediction`/`inspection_history` di sini tidak mungkin
-    melihat baris yang belum ada."""
+
     flagged = []
     for _, row in frame.iterrows():
         if not bool(row["gate_flagged"]):
             flagged.append(False)
             continue
         item_serial_code = str(row["host_serial_code"])
+        item_id = _pairing_code(item_serial_code)
+        cycle_store.lock_item(cur, item_id)
         score = float(row["failure_probability_30d"])
         if _has_open_alert(cur, item_serial_code):
             flagged.append(False)
@@ -247,6 +232,7 @@ def _auto_resolve_if_cycle_closed(cur, alert: dict) -> dict | None:
     if status is None or status["is_active"]:
         return None
 
+    cycle_store.lock_item(cur, item_id)
     next_seq = _next_inspection_seq(cur, alert["item_serial_code"])
     cur.execute(
         f"""
@@ -281,10 +267,6 @@ def auto_resolve_closed_cycles(item_ids: list[str] | None = None) -> list[int]:
 
 
 def resolve_by_item(item_id: str, host_serial_code: str) -> dict:
-    """Jalur MANUAL diidentifikasi lewat item (bukan prediction_id). Item
-    WAJIB sedang punya alert OPEN - raise `NoOpenAlert` kalau tidak.
-    `host_serial_code` harus cycle AKTIF item ini sekarang - raise
-    `HostSerialNotCurrent` kalau caller pakai serial code lama."""
     current_cycle = cycle_store.ensure_active_cycle(item_id)
     if current_cycle["cycle_id"] != host_serial_code:
         raise HostSerialNotCurrent(item_id, host_serial_code, current_cycle["cycle_id"])

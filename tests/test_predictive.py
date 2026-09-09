@@ -297,11 +297,17 @@ def _score_and_flag(
 ) -> dict:
     """Simulasi satu siklus scoring untuk SATU item lewat
     scoring.record_predictions() (jalur asli, bukan lagi evaluate_and_open()
-    terpisah) - kembalikan prediction_id + alert_flagged hasilnya."""
+    terpisah) - kembalikan prediction_id + alert_flagged hasilnya.
+
+    complete_run() WAJIB dipanggil di sini - open_alerts_by_item()/
+    get_alert()/_has_open_alert() sekarang cuma menganggap prediction dari
+    model_run berstatus SUCCEEDED sebagai alert yang sah (run RUNNING/FAILED
+    tidak valid, lihat alerts.py::_run_succeeded())."""
     run_id = scoring.start_run("test-model-v0")
     scored_at = scored_at or pd.Timestamp.now(tz="UTC")
     frame = pd.DataFrame([_prediction_row(item_id, host_serial_code, score, gate_flagged)])
-    scoring.record_predictions(run_id, frame, "test-model-v0", scored_at)
+    row_count = scoring.record_predictions(run_id, frame, "test-model-v0", scored_at)
+    scoring.complete_run(run_id, row_count)
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -455,16 +461,20 @@ def cleanup_prediction_ids():
 
 def _insert_flagged_prediction(
     item_serial_code: str, score: float = 0.5, scored_at: pd.Timestamp | None = None,
+    run_status: str = "SUCCEEDED",
 ) -> int:
     """INSERT langsung (bypass compute_alert_flagged) - dipakai simulasi
     skenario yang butuh baris alert_flagged=true SUDAH ada di DB terlepas
-    dari histori suppression (mis. cycle tertutup, atau duplikat sengaja)."""
+    dari histori suppression (mis. cycle tertutup, atau duplikat sengaja).
+    `run_status` dipakai menguji bahwa prediction dari run RUNNING/FAILED
+    TIDAK dianggap alert yang sah (alerts.py::_run_succeeded())."""
     scored_at = scored_at or pd.Timestamp.now(tz="UTC")
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO predictive.model_run (model_version, started_at, status) "
-                "VALUES ('test-model-v0', now(), 'SUCCEEDED') RETURNING run_id"
+                "VALUES ('test-model-v0', now(), %s) RETURNING run_id",
+                (run_status,),
             )
             run_id = cur.fetchone()[0]
             cur.execute(
@@ -500,6 +510,44 @@ def test_open_alerts_by_item_pakai_yang_terbaru_kalau_ada_duplikat(cleanup_predi
 
     result = alert_engine.open_alerts_by_item(["DUPITEM"])
     assert result["DUPITEM"]["prediction_id"] == newer
+
+
+@needs_database
+@pytest.mark.parametrize("run_status", ["RUNNING", "FAILED"])
+def test_prediction_dari_run_belum_selesai_tidak_dianggap_alert_sah(
+    run_status, cleanup_prediction_ids
+):
+    """record_predictions() commit SEBELUM complete_run() selesai - baris
+    item_prediction alert_flagged=true bisa saja berasal dari run yang
+    ujungnya RUNNING (proses crash sebelum sempat complete_run) atau FAILED.
+    open_alerts_by_item()/get_alert() WAJIB mengabaikan prediction seperti
+    ini (alerts.py::_run_succeeded())."""
+    prediction_id = _insert_flagged_prediction(
+        "TESTMODEL-BELUMSELESAI-01", run_status=run_status
+    )
+    cleanup_prediction_ids.append(prediction_id)
+
+    assert alert_engine.get_alert(prediction_id) is None
+    assert alert_engine.open_alerts_by_item(["BELUMSELESAI"]) == {}
+
+
+@needs_database
+@pytest.mark.parametrize("run_status", ["RUNNING", "FAILED"])
+def test_prediction_dari_run_belum_selesai_tidak_menahan_scoring_berikutnya(
+    run_status, cleanup_prediction_ids
+):
+    """_has_open_alert() (dipakai compute_alert_flagged() saat scoring
+    berikutnya) juga TIDAK boleh menganggap prediction dari run
+    RUNNING/FAILED sebagai 'sudah ada alert terbuka' - kalau tidak, item
+    itu tidak akan pernah bisa di-flag lagi walau run yang bermasalah tidak
+    pernah menghasilkan alert yang sungguhan valid."""
+    item_serial_code = "TESTMODEL-BELUMSELESAI2-01"
+    prediction_id = _insert_flagged_prediction(item_serial_code, run_status=run_status)
+    cleanup_prediction_ids.append(prediction_id)
+
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            assert alert_engine._has_open_alert(cur, item_serial_code) is False
 
 
 @needs_database
