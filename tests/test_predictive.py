@@ -240,11 +240,22 @@ def test_ensure_active_cycle_item_tidak_dikenal_ditolak():
         cycle_store.ensure_active_cycle("ITEM-TIDAK-PERNAH-ADA-XYZ")
 
 
+_TEST_MODEL_VERSION = "test-model-v0"
+
+
 @pytest.fixture
 def cleanup_alert_lifecycle():
     """Bersihkan seluruh jejak item_prediction/inspection_history/model_run
-    sintetis dibuat test alert lifecycle, dikelompokkan per item_id
-    (pairing code)."""
+    SINTETIS dibuat test alert lifecycle, dikelompokkan per item_id
+    (pairing code).
+
+    WAJIB dibatasi `model_version = 'test-model-v0'` (sentinel yang selalu
+    dipakai _score_and_flag()/_insert_flagged_prediction()) - item test
+    (scorable_item) adalah item AKTIF SUNGGUHAN, jadi tanpa filter ini
+    fixture bisa menghapus baris item_prediction/inspection_history ASLI
+    (mis. dari score-and-persist produksi/manual) yang KEBETULAN dipakai
+    item pairing code yang sama - bug nyata yang sempat terjadi (baris
+    prediction sungguhan terhapus lewat cleanup test)."""
     touched_items: list[str] = []
     yield touched_items
     if not touched_items:
@@ -253,16 +264,20 @@ def cleanup_alert_lifecycle():
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM predictive.inspection_history "
-                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s)", (touched_items,)
+                "WHERE prediction_id IN (SELECT prediction_id FROM predictive.item_prediction "
+                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s) AND model_version = %s)",
+                (touched_items, _TEST_MODEL_VERSION),
             )
             cur.execute(
                 "SELECT DISTINCT run_id FROM predictive.item_prediction "
-                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s)", (touched_items,)
+                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s) AND model_version = %s",
+                (touched_items, _TEST_MODEL_VERSION),
             )
             run_ids = [row[0] for row in cur.fetchall()]
             cur.execute(
                 "DELETE FROM predictive.item_prediction "
-                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s)", (touched_items,)
+                "WHERE split_part(item_serial_code, '-', 2) = ANY(%s) AND model_version = %s",
+                (touched_items, _TEST_MODEL_VERSION),
             )
             if run_ids:
                 # run_id BISA dipakai bersama run scoring penuh (mis. item test

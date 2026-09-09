@@ -3113,3 +3113,110 @@ siklus penuh (buka alert lewat scoring -> resolve lewat API -> cek
 scoring berikutnya), simulasi cycle ditutup ->
 `resolve-closed-alerts` menutup tanpa lewat API, `pytest tests/
 test_predictive.py tests/test_api.py -q` lalu `pytest -q` penuh.
+
+## 54 · Fitur konteks CORRECTIVE tak-tercatat - DITOLAK, ablation menurunkan PR-AUC/presisi
+
+**Status**: fitur DIIMPLEMENTASI (masuk `config.FEATURE_COLUMNS`, dihitung
+di training/live scoring), TAPI hasil ablation menunjukkan tidak membantu -
+model production (v6) TIDAK terpengaruh (fitur cuma dipakai kandidat baru
+yang belum tentu dipromosikan). 2026-09-09.
+
+**Masalah yang coba diatasi**: `journal.t_item_journey` (sumber
+`get_events()`/`get_cycles()`) cuma mencatat transaksi yang mengubah PART
+fisik (pasang/lepas/dismantle). Perbaikan CORRECTIVE kecil (kencangkan
+baut, reset, bersihkan) yang tidak melibatkan ganti PART tidak pernah
+tercatat di situ - model tidak pernah "melihat" bahwa teknisi sempat
+menangani lokasi itu. Diverifikasi ke DB nyata: 6.406 dari 13.352 (48%)
+work order CORRECTIVE TIDAK PERNAH menghasilkan baris `t_item_journey`
+(5.841 di antaranya CLOSED - genuinely selesai, dikonfirmasi lewat
+`t_work_order_history` tidak pernah ada `Request Item`/`Issue Item`/
+`Delivery`) - bukan kasus langka.
+
+**Implementasi** (dipertahankan di kode, lihat "Yang tidak dihapus" di
+bawah): `data_reader.py::get_untracked_corrective_work_orders()` (query
+baru, murni exact filter `work_type_code='21'` + `current_status='202'`
++ `NOT EXISTS` ke `t_item_journey.wo_code` - TIDAK ada fuzzy matching).
+Lokasi PART didapat via `get_cycles()` (1 kolom baru,
+`installation_location_code`, passthrough dari event INSTALLED-nya
+sendiri lewat exact join `wo_code -> t_work_order.location` - TIDAK
+pakai `place_canonical_clean` yang fuzzy). 3 fitur baru
+(`core/features.py::attach_untracked_corrective_context()`, idiom SAMA
+seperti `local_density`/`attach_fleet` yang sudah ada -
+`np.searchsorted(side="left")` grouped by lokasi, bukan per-PART):
+`log_untracked_corrective_30d`, `log_untracked_corrective_90d`,
+`log_days_since_untracked_corrective` (sentinel 9999 lewat
+`_log1p_days_since`, BUKAN `_log1p` yang buggy - fitur baru tidak punya
+distribusi model production yang perlu dijaga).
+
+**Ablation** (`python -m partrisk.cli ablation-untracked-corrective` -
+baseline 32 fitur vs baseline+3 fitur baru, `train_model()` dipanggil 2x
+pada SPLIT TRAIN/VALIDATION/TEST yang identik dari SATU `build_dataset()`):
+
+| Metrik | Baseline (32 fitur) | +3 fitur (35 fitur) | Selisih |
+|---|---|---|---|
+| PR-AUC (TEST) | 0.2277 | 0.1870 | **-0.0407** |
+| ROC-AUC (TEST) | 0.8203 | 0.8139 | -0.0064 |
+| Precision row-level (gerbang) | 0.4021 | 0.3521 | -0.0500 |
+| Recall row-level | 0.1472 | 0.1538 | +0.0066 |
+| Alert row-level | 388 | 463 | +75 |
+| FP row-level | 232 | 300 | +68 |
+| FN row-level | 904 | 897 | -7 |
+| Precision lifecycle | 0.4740 | 0.3733 | **-0.1007** |
+| Recall lifecycle | 0.1377 | 0.1764 | +0.0387 |
+| FP lifecycle | 162 | 314 | +152 |
+| FN lifecycle | 914 | 873 | -41 |
+
+**Kesimpulan**: recall naik tipis di kedua level, tapi presisi turun jauh
+lebih besar (row DAN lifecycle) - model dengan fitur baru membuka lebih
+banyak alert (388->463 baris, 308->501 siklus) tapi sebagian besar
+tambahan itu alert palsu. PR-AUC (metrik headline presisi-recall
+gabungan) turun jelas. **Fitur ini TIDAK diadopsi** - satu split
+TRAIN/VALIDATION/TEST (bukan rolling-backtest multi-periode), tapi
+sinyalnya cukup konsisten (PR-AUC turun DAN presisi turun di kedua level
+sekaligus) untuk tidak lanjut tanpa investigasi lebih dalam.
+
+**Kemungkinan alasan tidak membantu** (belum diinvestigasi lebih lanjut,
+sekadar hipotesis - JANGAN dianggap fakta): sinyal level-LOKASI (bukan
+per-PART - `t_work_order` tidak punya kolom PART sama sekali, lihat
+constraint asli) mungkin terlalu kasar/noisy relatif terhadap PART
+individual yang diprediksi - satu lokasi bisa punya banyak PART berbeda
+dengan kondisi berbeda-beda, jadi "ada corrective tak-tercatat di lokasi
+ini" belum tentu relevan untuk PART SPESIFIK yang sedang dinilai.
+
+**Yang tidak dihapus dari kode** (keputusan: simpan infrastruktur,
+tidak dipakai production): `get_untracked_corrective_work_orders()`,
+`installation_location_code` di `get_cycles()`, `attach_untracked_corrective_context()`/
+snapshot pair, dan `UNTRACKED_CORRECTIVE_FEATURES` tetap ada di
+`config.FEATURE_COLUMNS` - fiturnya TETAP dihitung di training/live
+scoring (kandidat model baru akan otomatis memakainya), TAPI model v6
+production tidak terpengaruh (subset ke `metadata["features"]` sendiri,
+diverifikasi predict() menghasilkan angka identik sebelum/sesudah). Kalau
+mau benar-benar dicabut dari `FEATURE_COLUMNS`, itu keputusan terpisah -
+belum dilakukan karena user belum diminta.
+
+**Bug ditemukan+diperbaiki saat verifikasi** (tidak tertangkap `pytest`,
+karena jalur ini TIDAK ADA test coverage-nya): `train.py::
+active_part_scores()` (dipanggil `main()` untuk memilih threshold HIGH/
+MEDIUM dari skor seluruh armada aktif) melewatkan wiring
+`attach_untracked_corrective_snapshot()` - `KeyError:
+'untracked_corrective_30d'` saat `python -m partrisk.engines.failure.train`
+dijalankan sungguhan (bukan cuma `build_dataset()`/`train_model()` yang
+dipakai ablation). Diperbaiki: `active_part_scores()` dapat parameter
+`untracked_corrective` baru, `main()` menghitung snapshot-nya sendiri
+(`data_reader.get_untracked_corrective_work_orders()` + `feature_builder.
+untracked_corrective_snapshot()`) persis sama seperti `fleet`/
+`item_type_density` di baris sebelumnya.
+
+**Verifikasi**: `pytest -q` penuh - 100% lolos, exit code 0 (tapi TIDAK
+menangkap bug di atas - celah coverage nyata di `main()`, dicatat di sini
+apa adanya, belum ditambah test baru karena belum diminta).
+`python -m partrisk.engines.failure.train` (setelah fix) - berhasil
+penuh, tersimpan sebagai **v13** (35 fitur). TEST PR-AUC v13 = **0,1870**
+- IDENTIK dengan angka ablation di atas (cross-check jalur penuh vs
+`train_model()` langsung, saling mengonfirmasi benar). **v13 TIDAK
+dipromosikan** - `decide_promotion()` menolak di VALIDATION (PR-AUC
+0,1156 vs v6 0,1155, hampir seri, tapi Recall@kapasitas v13 0,2837 <
+v6 0,3105) - v6 tetap production, konsisten dengan hasil ablation.
+`predict('011201100101380')` sebelum/sesudah seluruh perubahan kode -
+`0,4762` IDENTIK, model v6 production tidak terpengaruh sama sekali
+(subset ke `metadata["features"]` versinya sendiri).

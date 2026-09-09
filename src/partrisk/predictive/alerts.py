@@ -37,9 +37,6 @@ class AlertNotOpen(ValueError):
 
 
 class HostSerialNotCurrent(ValueError):
-    """host_serial_code yang dikirim caller bukan cycle aktif item ini
-    sekarang - kemungkinan caller pakai serial code lama (dari sebelum
-    perbaikan/pemasangan ulang terakhir)."""
 
     def __init__(self, item_id: str, given: str, current: str) -> None:
         self.item_id = item_id
@@ -52,19 +49,12 @@ class HostSerialNotCurrent(ValueError):
 
 
 class NoOpenAlert(LookupError):
-    """Item tidak sedang punya alert OPEN - `POST /api/v1/inspections`
-    HANYA boleh dipakai untuk merespons alert yang sudah dibuka model,
-    bukan untuk mencatat perbaikan di luar itu (keputusan user)."""
-
     def __init__(self, item_id: str) -> None:
         self.item_id = item_id
         super().__init__(f"Item {item_id!r} tidak sedang punya alert OPEN.")
 
 
 class AlertCycleMismatch(ValueError):
-    """Item sudah pindah cycle sejak alert ini dibuka (cycle diidentifikasi
-    lewat host_serial_code)."""
-
     def __init__(self, prediction_id: int, alert_host_serial_code: str, current_host_serial_code: str) -> None:
         self.prediction_id = prediction_id
         self.alert_host_serial_code = alert_host_serial_code
@@ -224,9 +214,6 @@ def compute_alert_flagged(cur, frame: pd.DataFrame, scored_at: pd.Timestamp) -> 
 
 
 def _auto_resolve_if_cycle_closed(cur, alert: dict) -> dict | None:
-    """Return baris `inspection_history` yang baru dibuat (kalau cycle-nya
-    memang sudah tertutup), None kalau cycle masih aktif atau sudah
-    di-inspect duluan (race, ditangkap `ON CONFLICT DO NOTHING`)."""
     item_id = _pairing_code(alert["item_serial_code"])
     status = cycle_store.cycle_status(item_id, alert["item_serial_code"])
     if status is None or status["is_active"]:
@@ -251,9 +238,6 @@ def _auto_resolve_if_cycle_closed(cur, alert: dict) -> dict | None:
 
 
 def auto_resolve_closed_cycles(item_ids: list[str] | None = None) -> list[int]:
-    """Tutup (INSERT `inspection_history`, TANPA inspeksi asli) setiap
-    alert OPEN yang cycle-nya sudah tertutup di data operasional. Return
-    daftar `prediction_id` yang baru ditutup lewat jalur ini."""
     open_alerts = open_alerts_by_item(item_ids)
     resolved_ids: list[int] = []
     for alert in open_alerts.values():
@@ -280,7 +264,6 @@ def resolve_by_item(item_id: str, host_serial_code: str) -> dict:
 
 
 def resolve_with_inspection(prediction_id: int) -> dict:
-    """Jalur MANUAL untuk menutup alert - selalu lewat inspection tercatat."""
     alert = get_alert(prediction_id)
     if alert is None:
         raise AlertNotFound(prediction_id)
