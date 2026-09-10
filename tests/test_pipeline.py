@@ -138,8 +138,8 @@ def test_bootstrap_ci_sadar_klaster_lebih_lebar_dari_resample_baris_iid():
 
 
 @needs_models
-def test_model_dimuat_sekali_dipakai_ulang():
-    failure_model._LOADED_FAILURE = None
+def test_model_dimuat_sekali_dipakai_ulang(monkeypatch):
+    monkeypatch.setattr(failure_model, "_LOADED_FAILURE", None)
     first = failure_model._load_failure_model()
     second = failure_model._load_failure_model()
     assert first[0] is second[0]
@@ -147,12 +147,12 @@ def test_model_dimuat_sekali_dipakai_ulang():
 
 
 @needs_models
-def test_model_baru_terlihat_setelah_cache_direset(tmp_path_factory=None):
-    failure_model._LOADED_FAILURE = None
+def test_model_baru_terlihat_setelah_cache_direset(monkeypatch):
+    monkeypatch.setattr(failure_model, "_LOADED_FAILURE", None)
     first = failure_model._load_failure_model()
     version_first = first[2]["model_version"]
 
-    failure_model._LOADED_FAILURE = None
+    monkeypatch.setattr(failure_model, "_LOADED_FAILURE", None)
     second = failure_model._load_failure_model()
     version_second = second[2]["model_version"]
 
@@ -161,9 +161,9 @@ def test_model_baru_terlihat_setelah_cache_direset(tmp_path_factory=None):
 
 
 @needs_models
-def test_fleet_snapshot_ikut_dibuang_saat_model_direset():
-    failure_model._LOADED_FAILURE = None
-    failure_model._FLEET = None
+def test_fleet_snapshot_ikut_dibuang_saat_model_direset(monkeypatch):
+    monkeypatch.setattr(failure_model, "_LOADED_FAILURE", None)
+    monkeypatch.setattr(failure_model, "_FLEET", None)
     metadata = failure_model._load_failure_model()[2]
     snapshot = failure_model._fleet_snapshot(pd.Timestamp(metadata["fleet_snapshot_at"]))
     assert not snapshot.empty
@@ -260,8 +260,11 @@ def test_label_negatif_dekat_batas_data_tidak_dipakai():
     before_boundary = observations["observation_on"] <= last_confirmable
     after_boundary = observations["observation_on"] > last_confirmable
 
-    assert before_boundary.any() and after_boundary.any(), (
-        "grid observasi test tidak mencakup kedua sisi batas - perbaiki setup test"
+    assert before_boundary.any(), (
+        "grid observasi test tidak mencakup sisi SEBELUM batas - perbaiki setup test"
+    )
+    assert after_boundary.any(), (
+        "grid observasi test tidak mencakup sisi SESUDAH batas - perbaiki setup test"
     )
     assert observations.loc[before_boundary, "is_eligible"].all(), (
         "observasi sebelum batas confirmable seharusnya layak dipakai (negatif terbukti)"
@@ -336,7 +339,6 @@ def test_assign_split_membuang_observasi_terlalu_lama():
 
 def test_assign_split_test_dan_validation_tidak_tumpang_tindih_dengan_train():
     data_end = pd.Timestamp("2026-08-03")
-    horizon = pd.Timedelta(days=config.TARGET_HORIZON_DAYS)
     validation_start = pd.Timestamp(year=data_end.year, month=1, day=1) - pd.DateOffset(years=1)
 
     dataset = pd.DataFrame({

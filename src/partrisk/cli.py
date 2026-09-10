@@ -102,44 +102,48 @@ _import_model_artifacts_logger = logging.getLogger("import-model-artifacts")
 
 def _import_model_artifacts_main() -> int:
     """Migrasi satu kali models/failure/v*/ -> predictive.model_artifact."""
-    existing = set(model_store.list_versions())
-    candidates = sorted(
-        (
-            path for path in config.FAILURE_MODEL_DIR.glob("v*")
-            if path.is_dir() and (path / "metadata.json").exists()
-        ),
-        key=lambda path: int(path.name[1:]),
-    )
-    if not candidates:
-        _import_model_artifacts_logger.info("tidak ada versi di %s untuk dimigrasikan", config.FAILURE_MODEL_DIR)
-        return 0
+    try:
+        existing = set(model_store.list_versions())
+        candidates = sorted(
+            (
+                path for path in config.FAILURE_MODEL_DIR.glob("v*")
+                if path.is_dir() and (path / "metadata.json").exists()
+            ),
+            key=lambda path: int(path.name[1:]),
+        )
+        if not candidates:
+            _import_model_artifacts_logger.info("tidak ada versi di %s untuk dimigrasikan", config.FAILURE_MODEL_DIR)
+            return 0
 
-    imported = 0
-    for directory in candidates:
-        version = directory.name
-        if version in existing:
-            _import_model_artifacts_logger.info("%s sudah ada di database, dilewati", version)
-            continue
+        imported = 0
+        for directory in candidates:
+            version = directory.name
+            if version in existing:
+                _import_model_artifacts_logger.info("%s sudah ada di database, dilewati", version)
+                continue
 
-        model = CatBoostClassifier()
-        model.load_model(str(directory / "model.cbm"))
-        calibrator = joblib.load(directory / "calibrator.joblib")
-        fleet = pd.read_csv(directory / "fleet_snapshot.csv", dtype={"item_model_code_clean": str})
-        metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+            model = CatBoostClassifier()
+            model.load_model(str(directory / "model.cbm"))
+            calibrator = joblib.load(directory / "calibrator.joblib")
+            fleet = pd.read_csv(directory / "fleet_snapshot.csv", dtype={"item_model_code_clean": str})
+            metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
 
-        model_store.save_version(version, model, calibrator, fleet, metadata)
-        imported += 1
-        _import_model_artifacts_logger.info("%s dimigrasikan ke database", version)
+            model_store.save_version(version, model, calibrator, fleet, metadata)
+            imported += 1
+            _import_model_artifacts_logger.info("%s dimigrasikan ke database", version)
 
-    pointer = config.FAILURE_MODEL_DIR / "CURRENT"
-    if pointer.exists():
-        current = pointer.read_text(encoding="utf-8").strip()
-        model_store.set_current_version(current)
-        _import_model_artifacts_logger.info("is_current diset ke %s", current)
+        pointer = config.FAILURE_MODEL_DIR / "CURRENT"
+        if pointer.exists():
+            current = pointer.read_text(encoding="utf-8").strip()
+            model_store.set_current_version(current)
+            _import_model_artifacts_logger.info("is_current diset ke %s", current)
 
-    _import_model_artifacts_logger.info(
-        "selesai: %d versi baru dimigrasikan, %d sudah ada sebelumnya", imported, len(candidates) - imported
-    )
+        _import_model_artifacts_logger.info(
+            "selesai: %d versi baru dimigrasikan, %d sudah ada sebelumnya", imported, len(candidates) - imported
+        )
+    except Exception:
+        _import_model_artifacts_logger.exception("import-model-artifacts gagal")
+        return 1
     return 0
 
 
@@ -187,7 +191,7 @@ def _load_batch():
 
 
 def generate(out_path: Path) -> None:
-    print(f"[1/2] Menjalankan batch_predictor.score_active_parts(force_refresh=True)...")
+    print("[1/2] Menjalankan batch_predictor.score_active_parts(force_refresh=True)...")
     t0 = time.time()
     batch = _load_batch()
     print(f"      selesai dalam {time.time()-t0:.1f} detik - {len(batch.frame):,} PART aktif")
@@ -221,6 +225,61 @@ def _split(combined: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return frame.reset_index(drop=True), snapshot.reset_index(drop=True)
 
 
+def _relevant_columns(
+    name: str, cols_a: set[str], cols_b: set[str], columns: set[str] | None,
+) -> tuple[set[str] | None, bool]:
+    if columns is not None:
+        relevant = columns & cols_a & cols_b
+        if not relevant:
+            print(f"  (tidak ada kolom diminta yang relevan di tabel {name}, dilewati)")
+            return None, True
+        return relevant, True
+    if cols_a != cols_b:
+        print(f"  KOLOM BEDA: hanya di A={cols_a-cols_b}  hanya di B={cols_b-cols_a}")
+        return None, False
+    return cols_a, True
+
+
+def _align_row_population(
+    a_sorted: pd.DataFrame, b_sorted: pd.DataFrame, key: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+    if list(a_sorted[key]) == list(b_sorted[key]):
+        return a_sorted, b_sorted, True
+
+    only_a = set(a_sorted[key]) - set(b_sorted[key])
+    only_b = set(b_sorted[key]) - set(a_sorted[key])
+    print(f"  POPULASI {key} BEDA: hanya di A={len(only_a)}  hanya di B={len(only_b)}")
+    if only_a:
+        print(f"    contoh hanya-A: {list(only_a)[:5]}")
+    if only_b:
+        print(f"    contoh hanya-B: {list(only_b)[:5]}")
+    common = sorted(set(a_sorted[key]) & set(b_sorted[key]))
+    a_sorted = a_sorted.set_index(key).loc[common].reset_index()
+    b_sorted = b_sorted.set_index(key).loc[common].reset_index()
+    return a_sorted, b_sorted, False
+
+
+def _diff_columns(
+    a_sorted: pd.DataFrame, b_sorted: pd.DataFrame, key: str, cols: set[str], rtol: float,
+) -> bool:
+    ok = True
+    for col in sorted(cols - _VOLATILE_COLUMNS):
+        sa, sb = a_sorted[col], b_sorted[col]
+        if pd.api.types.is_numeric_dtype(sa) and pd.api.types.is_numeric_dtype(sb):
+            diff_mask = ~np.isclose(
+                sa.to_numpy(dtype=float), sb.to_numpy(dtype=float), rtol=rtol, equal_nan=True
+            )
+        else:
+            diff_mask = (sa.astype(str) != sb.astype(str)).to_numpy()
+        n_diff = int(diff_mask.sum())
+        if n_diff:
+            ok = False
+            idx = np.flatnonzero(diff_mask)[:5]
+            sample = [(a_sorted[key].iloc[i], sa.iloc[i], sb.iloc[i]) for i in idx]
+            print(f"  KOLOM '{col}': {n_diff}/{len(a_sorted):,} baris beda. Contoh (id, A, B): {sample}")
+    return ok
+
+
 def compare(path_a: Path, path_b: Path, *, rtol: float = 1e-9, columns: set[str] | None = None) -> bool:
     frame_a, snap_a = _split(pd.read_parquet(path_a))
     frame_b, snap_b = _split(pd.read_parquet(path_b))
@@ -228,49 +287,17 @@ def compare(path_a: Path, path_b: Path, *, rtol: float = 1e-9, columns: set[str]
     ok = True
     for name, a, b, key in (("frame", frame_a, frame_b, "item_id"), ("snapshot", snap_a, snap_b, "item_id")):
         print(f"\n--- {name}: {path_a.name} ({len(a):,} baris) vs {path_b.name} ({len(b):,} baris) ---")
-        cols_a, cols_b = set(a.columns), set(b.columns)
-        if columns is not None:
-            relevant = columns & cols_a & cols_b
-            if not relevant:
-                print(f"  (tidak ada kolom diminta yang relevan di tabel {name}, dilewati)")
-                continue
-            cols_a = cols_b = relevant
-        elif cols_a != cols_b:
-            print(f"  KOLOM BEDA: hanya di A={cols_a-cols_b}  hanya di B={cols_b-cols_a}")
-            ok = False
+        cols, cols_ok = _relevant_columns(name, set(a.columns), set(b.columns), columns)
+        ok = ok and cols_ok
+        if cols is None:
             continue
 
         a_sorted = a.sort_values(key).reset_index(drop=True)
         b_sorted = b.sort_values(key).reset_index(drop=True)
-        if list(a_sorted[key]) != list(b_sorted[key]):
-            only_a = set(a_sorted[key]) - set(b_sorted[key])
-            only_b = set(b_sorted[key]) - set(a_sorted[key])
-            print(f"  POPULASI {key} BEDA: hanya di A={len(only_a)}  hanya di B={len(only_b)}")
-            if only_a:
-                print(f"    contoh hanya-A: {list(only_a)[:5]}")
-            if only_b:
-                print(f"    contoh hanya-B: {list(only_b)[:5]}")
-            ok = False
-            common = sorted(set(a_sorted[key]) & set(b_sorted[key]))
-            a_sorted = a_sorted.set_index(key).loc[common].reset_index()
-            b_sorted = b_sorted.set_index(key).loc[common].reset_index()
+        a_sorted, b_sorted, rows_ok = _align_row_population(a_sorted, b_sorted, key)
+        ok = ok and rows_ok
 
-        for col in sorted(cols_a - _VOLATILE_COLUMNS):
-            sa, sb = a_sorted[col], b_sorted[col]
-            if pd.api.types.is_numeric_dtype(sa) and pd.api.types.is_numeric_dtype(sb):
-                diff_mask = ~np.isclose(
-                    sa.to_numpy(dtype=float), sb.to_numpy(dtype=float), rtol=rtol, equal_nan=True
-                )
-            else:
-                diff_mask = (sa.astype(str) != sb.astype(str)).to_numpy()
-            n_diff = int(diff_mask.sum())
-            if n_diff:
-                ok = False
-                idx = np.flatnonzero(diff_mask)[:5]
-                sample = [
-                    (a_sorted[key].iloc[i], sa.iloc[i], sb.iloc[i]) for i in idx
-                ]
-                print(f"  KOLOM '{col}': {n_diff}/{len(a_sorted):,} baris beda. Contoh (id, A, B): {sample}")
+        ok = _diff_columns(a_sorted, b_sorted, key, cols, rtol) and ok
 
     print(f"\n{'=== IDENTIK ===' if ok else '=== ADA PERBEDAAN - lihat di atas ==='}")
     return ok
@@ -296,7 +323,7 @@ def _baseline_performance_main() -> int:
 
     print("\n[1/4] Cold model load...")
     t0 = time.time()
-    model, calibrator, metadata = failure_model.load_failure_model()
+    _, _, metadata = failure_model.load_failure_model()
     cold_load_s = time.time() - t0
     rss_after_load = _rss_mb()
     print(f"      cold load: {cold_load_s:.3f} detik")
@@ -388,7 +415,7 @@ def _capacity_table(
 
 def _baseline_comparison_main() -> int:
     print("[1/3] Menyusun dataset TEST (sama seperti training_failure.build_dataset)...")
-    dataset, _features, support_totals, data_end, events, cycles, episodes = (
+    dataset, _, _, _, _, _, _ = (
         training_failure.build_dataset()
     )
     test_dataset = dataset.loc[dataset["split"].eq(training_failure.TEST)].reset_index(drop=True)
@@ -401,7 +428,7 @@ def _baseline_comparison_main() -> int:
     )
 
     print("[2/3] Skor model production (dukungan BEKU dari metadata - sama seperti predict.py)...")
-    model, calibrator, metadata = predict.load_failure_model()
+    model, _, metadata = predict.load_failure_model()
     support = feature_builder.part_model_support(test_dataset, metadata["part_model_support"])
     candidate_features = feature_builder.build_features(test_dataset, support)[metadata["features"]]
     candidate_raw = model.predict_proba(candidate_features)[:, 1]
@@ -507,25 +534,10 @@ def _fit_and_evaluate_fold(
     )
 
 
-def _rolling_backtest_main() -> int:
-    print("[1/3] Menyusun dataset (sekali, dipakai ulang untuk semua fold)...")
-    dataset, features, support_totals, data_end, events, cycles, episodes = (
-        training_failure.build_dataset()
-    )
-
-    _, _, v3_metadata = model_store.load_version("v3")
-    _, _, v4_metadata = model_store.load_version("v4")
-    v3_name = f"v3 ({len(v3_metadata['features'])} fitur)"
-    v4_name = f"v4 ({len(v4_metadata['features'])} fitur)"
-    variants = {v3_name: v3_metadata["features"], v4_name: v4_metadata["features"]}
-
-    windows = _rolling_fold_windows(data_end)
-    print(
-        f"[2/3] {len(windows)} fold, window {_ROLLING_BACKTEST_STEP_DAYS} hari masing-masing, "
-        f"validasi {_ROLLING_BACKTEST_VALIDATION_DAYS} hari sebelum tiap fold, "
-        f"embargo {config.TARGET_HORIZON_DAYS} hari (sama seperti training production)..."
-    )
-
+def _run_rolling_folds(
+    dataset: pd.DataFrame, features: pd.DataFrame,
+    windows: list[tuple[pd.Timestamp, pd.Timestamp]], variants: dict[str, list[str]],
+) -> dict[str, list[dict]]:
     results: dict[str, list[dict]] = {name: [] for name in variants}
     for i, (test_start, test_end) in enumerate(windows, start=1):
         dataset["split"] = _assign_rolling_split(dataset, test_start, test_end)
@@ -544,9 +556,10 @@ def _rolling_backtest_main() -> int:
                 f"Precision@cap={metrics['precision_at_capacity']:.4f} "
                 f"Recall@cap={metrics['recall_at_capacity']:.4f}"
             )
+    return results
 
-    print("\n[3/3] Ringkasan mean +/- sd lintas fold...")
-    summary_keys = ["roc_auc", "pr_auc", "brier_calibrated", "precision_at_capacity", "recall_at_capacity"]
+
+def _print_rolling_summary(results: dict[str, list[dict]], summary_keys: list[str]) -> None:
     for name, fold_results in results.items():
         print(f"\n  {name}")
         for key in summary_keys:
@@ -555,22 +568,55 @@ def _rolling_backtest_main() -> int:
             sd = statistics.stdev(values) if len(values) > 1 else 0.0
             print(f"      {key:<24} {mean:.4f} +/- {sd:.4f}")
 
+
+def _rolling_pairwise_verdict(mean_diff: float, sd_diff: float) -> str:
+    if sd_diff == 0:
+        return "sd=0, tidak bisa dinilai"
+    if mean_diff > sd_diff:
+        return "v4 > v3 (melebihi 1 sd)"
+    if -mean_diff > sd_diff:
+        return "v3 > v4 (melebihi 1 sd)"
+    return "TIDAK signifikan (dalam 1 sd) - jangan klaim mana yang lebih baik"
+
+
+def _print_rolling_pairwise_comparison(
+    results: dict[str, list[dict]], v3_name: str, v4_name: str, summary_keys: list[str],
+) -> None:
     print(f"\n  Perbandingan berpasangan per-fold ({v4_name} - {v3_name}):")
     print("  (klaim 'A > B' hanya kalau selisih rata-rata melebihi 1 sd selisih per-fold)")
     for key in summary_keys:
         diffs = [b[key] - a[key] for a, b in zip(results[v3_name], results[v4_name])]
         mean_diff = statistics.mean(diffs)
         sd_diff = statistics.stdev(diffs) if len(diffs) > 1 else 0.0
-        if sd_diff == 0:
-            verdict = "sd=0, tidak bisa dinilai"
-        elif mean_diff > sd_diff:
-            verdict = "v4 > v3 (melebihi 1 sd)"
-        elif -mean_diff > sd_diff:
-            verdict = "v3 > v4 (melebihi 1 sd)"
-        else:
-            verdict = "TIDAK signifikan (dalam 1 sd) - jangan klaim mana yang lebih baik"
+        verdict = _rolling_pairwise_verdict(mean_diff, sd_diff)
         print(f"      {key:<24} selisih={mean_diff:+.4f} +/- {sd_diff:.4f}   -> {verdict}")
 
+
+def _rolling_backtest_main() -> int:
+    print("[1/3] Menyusun dataset (sekali, dipakai ulang untuk semua fold)...")
+    dataset, features, _, data_end, _, _, _ = (
+        training_failure.build_dataset()
+    )
+
+    _, _, v3_metadata = model_store.load_version("v3")
+    _, _, v4_metadata = model_store.load_version("v4")
+    v3_name = f"v3 ({len(v3_metadata['features'])} fitur)"
+    v4_name = f"v4 ({len(v4_metadata['features'])} fitur)"
+    variants = {v3_name: v3_metadata["features"], v4_name: v4_metadata["features"]}
+
+    windows = _rolling_fold_windows(data_end)
+    print(
+        f"[2/3] {len(windows)} fold, window {_ROLLING_BACKTEST_STEP_DAYS} hari masing-masing, "
+        f"validasi {_ROLLING_BACKTEST_VALIDATION_DAYS} hari sebelum tiap fold, "
+        f"embargo {config.TARGET_HORIZON_DAYS} hari (sama seperti training production)..."
+    )
+
+    results = _run_rolling_folds(dataset, features, windows, variants)
+
+    print("\n[3/3] Ringkasan mean +/- sd lintas fold...")
+    summary_keys = ["roc_auc", "pr_auc", "brier_calibrated", "precision_at_capacity", "recall_at_capacity"]
+    _print_rolling_summary(results, summary_keys)
+    _print_rolling_pairwise_comparison(results, v3_name, v4_name, summary_keys)
     return 0
 
 
@@ -618,12 +664,8 @@ def _fit_and_evaluate_fold_lifecycle(
 
 
 def _rolling_lifecycle_backtest_main() -> int:
-    """FASE 8: stabilitas antar-periode model failure production (fitur
-    v4 saat ini, retrain segar tiap fold) diukur lifecycle-based (E-49) -
-    presisi/recall/alert per fold dan mean+/-sd, di beberapa target
-    presisi. Tidak menyimpan/mempromosikan model apa pun."""
     print("[1/3] Menyusun dataset (sekali, dipakai ulang semua fold)...")
-    dataset, features, support_totals, data_end, events, cycles, episodes = (
+    dataset, features, _, data_end, _, _, _ = (
         training_failure.build_dataset()
     )
     feature_columns = config.FEATURE_COLUMNS

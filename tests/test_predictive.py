@@ -138,30 +138,35 @@ def _valid_prediction_row(item_id: str = "TEST-ITEM-GUARD") -> dict:
 
 
 def test_record_predictions_menolak_frame_kosong():
+    empty_frame = pd.DataFrame()
+    scored_at = pd.Timestamp.now(tz="UTC")
     with pytest.raises(RuntimeError, match="kosong"):
-        scoring.record_predictions(1, pd.DataFrame(), "test-model-v0", pd.Timestamp.now(tz="UTC"))
+        scoring.record_predictions(1, empty_frame, "test-model-v0", scored_at)
 
 
 def test_record_predictions_menolak_item_id_duplikat():
     frame = pd.DataFrame([_valid_prediction_row(), _valid_prediction_row()])
+    scored_at = pd.Timestamp.now(tz="UTC")
     with pytest.raises(RuntimeError, match="duplikat"):
-        scoring.record_predictions(1, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+        scoring.record_predictions(1, frame, "test-model-v0", scored_at)
 
 
 def test_record_predictions_menolak_probabilitas_nan():
     row = _valid_prediction_row()
     row["failure_probability_60d"] = float("nan")
     frame = pd.DataFrame([row])
+    scored_at = pd.Timestamp.now(tz="UTC")
     with pytest.raises(RuntimeError, match="NaN"):
-        scoring.record_predictions(1, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+        scoring.record_predictions(1, frame, "test-model-v0", scored_at)
 
 
 def test_record_predictions_menolak_host_serial_code_kosong():
     row = _valid_prediction_row()
     row["host_serial_code"] = None
     frame = pd.DataFrame([row])
+    scored_at = pd.Timestamp.now(tz="UTC")
     with pytest.raises(RuntimeError, match="host_serial_code"):
-        scoring.record_predictions(1, frame, "test-model-v0", pd.Timestamp.now(tz="UTC"))
+        scoring.record_predictions(1, frame, "test-model-v0", scored_at)
 
 
 @needs_database
@@ -231,7 +236,8 @@ def test_ensure_active_cycle_idempotent(scorable_item):
     second = cycle_store.ensure_active_cycle(scorable_item)
 
     assert first["cycle_id"] == second["cycle_id"]
-    assert first["is_active"] is True and second["is_active"] is True
+    assert first["is_active"] is True
+    assert second["is_active"] is True
 
 
 @needs_database
@@ -476,13 +482,8 @@ def cleanup_prediction_ids():
 
 def _insert_flagged_prediction(
     item_serial_code: str, score: float = 0.5, scored_at: pd.Timestamp | None = None,
-    run_status: str = "SUCCEEDED",
+    run_status: str = "SUCCEEDED", gate_flagged: bool = True, alert_flagged: bool = True,
 ) -> int:
-    """INSERT langsung (bypass compute_alert_flagged) - dipakai simulasi
-    skenario yang butuh baris alert_flagged=true SUDAH ada di DB terlepas
-    dari histori suppression (mis. cycle tertutup, atau duplikat sengaja).
-    `run_status` dipakai menguji bahwa prediction dari run RUNNING/FAILED
-    TIDAK dianggap alert yang sah (alerts.py::_run_succeeded())."""
     scored_at = scored_at or pd.Timestamp.now(tz="UTC")
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
@@ -497,10 +498,13 @@ def _insert_flagged_prediction(
                 INSERT INTO predictive.item_prediction
                     (run_id, item_serial_code, p30, p60, p90, p120, risk_level,
                      gate_flagged, alert_flagged, scored_at, model_version)
-                VALUES (%s, %s, %s, %s, %s, %s, 'MEDIUM', TRUE, TRUE, %s, 'test-model-v0')
+                VALUES (%s, %s, %s, %s, %s, %s, 'MEDIUM', %s, %s, %s, 'test-model-v0')
                 RETURNING prediction_id
                 """,
-                (run_id, item_serial_code, score, score, score, score, scored_at.to_pydatetime()),
+                (
+                    run_id, item_serial_code, score, score, score, score,
+                    gate_flagged, alert_flagged, scored_at.to_pydatetime(),
+                ),
             )
             prediction_id = cur.fetchone()[0]
         conn.commit()
@@ -509,12 +513,6 @@ def _insert_flagged_prediction(
 
 @needs_database
 def test_open_alerts_by_item_pakai_yang_terbaru_kalau_ada_duplikat(cleanup_prediction_ids):
-    """Jalur normal (compute_alert_flagged) tidak pernah membuat dua
-    prediction alert_flagged=true yang sama-sama belum di-inspect untuk
-    item yang sama (lihat test_alert_flagged_tidak_true_lagi_selama_masih_open).
-    Tapi kalau itu tetap terjadi (mis. race, atau insert manual),
-    open_alerts_by_item() harus tetap pakai yang scored_at TERBARU, bukan
-    crash atau ambigu."""
     older = _insert_flagged_prediction(
         "TESTMODEL-DUPITEM-01", score=0.5, scored_at=pd.Timestamp("2026-01-01", tz="UTC")
     )
@@ -551,11 +549,6 @@ def test_prediction_dari_run_belum_selesai_tidak_dianggap_alert_sah(
 def test_prediction_dari_run_belum_selesai_tidak_menahan_scoring_berikutnya(
     run_status, cleanup_prediction_ids
 ):
-    """_has_open_alert() (dipakai compute_alert_flagged() saat scoring
-    berikutnya) juga TIDAK boleh menganggap prediction dari run
-    RUNNING/FAILED sebagai 'sudah ada alert terbuka' - kalau tidak, item
-    itu tidak akan pernah bisa di-flag lagi walau run yang bermasalah tidak
-    pernah menghasilkan alert yang sungguhan valid."""
     item_serial_code = "TESTMODEL-BELUMSELESAI2-01"
     prediction_id = _insert_flagged_prediction(item_serial_code, run_status=run_status)
     cleanup_prediction_ids.append(prediction_id)
@@ -563,6 +556,44 @@ def test_prediction_dari_run_belum_selesai_tidak_menahan_scoring_berikutnya(
     with predictive_db.connect() as conn:
         with conn.cursor() as cur:
             assert alert_engine._has_open_alert(cur, item_serial_code) is False
+
+
+@needs_database
+def test_alert_lama_superseded_kalau_run_baru_sudah_gate_flagged_false(cleanup_prediction_ids):
+    item_serial_code = "TESTMODEL-SUPERSEDED-01"
+    older = _insert_flagged_prediction(
+        item_serial_code, score=0.9, scored_at=pd.Timestamp("2026-06-01", tz="UTC"),
+    )
+    newer = _insert_flagged_prediction(
+        item_serial_code, score=0.1, scored_at=pd.Timestamp("2026-07-01", tz="UTC"),
+        gate_flagged=False, alert_flagged=False,
+    )
+    cleanup_prediction_ids.extend([older, newer])
+
+    assert alert_engine.get_alert(older) is None
+    assert alert_engine.open_alerts_by_item(["SUPERSEDED"]) == {}
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            assert alert_engine._has_open_alert(cur, item_serial_code) is False
+
+
+@needs_database
+def test_alert_lama_tidak_superseded_kalau_run_baru_masih_gate_flagged(cleanup_prediction_ids):
+    item_serial_code = "TESTMODEL-TETAPOPEN-01"
+    older = _insert_flagged_prediction(
+        item_serial_code, score=0.9, scored_at=pd.Timestamp("2026-06-01", tz="UTC"),
+    )
+    newer = _insert_flagged_prediction(
+        item_serial_code, score=0.85, scored_at=pd.Timestamp("2026-07-01", tz="UTC"),
+        gate_flagged=True, alert_flagged=False,
+    )
+    cleanup_prediction_ids.extend([older, newer])
+
+    assert alert_engine.get_alert(older) is not None
+    assert alert_engine.open_alerts_by_item(["TETAPOPEN"])["TETAPOPEN"]["prediction_id"] == older
+    with predictive_db.connect() as conn:
+        with conn.cursor() as cur:
+            assert alert_engine._has_open_alert(cur, item_serial_code) is True
 
 
 @needs_database
@@ -582,10 +613,6 @@ def test_auto_resolve_closed_cycles_menutup_alert_pada_cycle_yang_sudah_berakhir
 def test_resolve_with_inspection_auto_resolve_alert_pada_cycle_lama(
     closed_cycle, cleanup_prediction_ids
 ):
-    """Kalau inspection diajukan untuk alert yang cycle-nya TERNYATA sudah
-    tertutup di data operasional (item sudah pindah cycle), alert lama itu
-    auto-resolved dulu (bukan AlertCycleMismatch mentah) - lihat WHY di
-    resolve_with_inspection()."""
     prediction_id = _insert_flagged_prediction(closed_cycle["cycle_id"])
     cleanup_prediction_ids.append(prediction_id)
 
@@ -597,8 +624,6 @@ def test_resolve_with_inspection_auto_resolve_alert_pada_cycle_lama(
 
 @needs_database
 def test_resolve_item_by_host_serial_code(scorable_item):
-    """host_serial_code (format MODEL-PAIRINGCODE-REPAIRSEQ, docs §28) harus
-    diresolve balik ke item_id internal yang sama dengan scorable_item."""
     with data_reader.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -642,10 +667,6 @@ def test_resolve_by_item_dengan_alert_open_meresolve_alert(
 def test_resolve_by_item_tanpa_alert_open_ditolak(
     scorable_item, scorable_item_host_serial_code
 ):
-    """Keputusan user: endpoint ini HANYA untuk merespons alert yang sudah
-    dibuka model - item tanpa alert OPEN harus ditolak (`NoOpenAlert`),
-    bukan diam-diam dicatat sebagai inspection berdiri sendiri (SUPERSEDED
-    dari docs/DECISIONS.md §25)."""
     with pytest.raises(alert_engine.NoOpenAlert) as excinfo:
         alert_engine.resolve_by_item(scorable_item, scorable_item_host_serial_code)
 
@@ -657,11 +678,6 @@ def test_resolve_by_item_tanpa_alert_open_ditolak(
 def test_resolve_by_item_dua_episode_alert_berturutan_hasilkan_dua_inspection(
     scorable_item, scorable_item_host_serial_code, cleanup_alert_lifecycle
 ):
-    """Dua episode alert berturutan pada item yang sama (buka -> resolve ->
-    re-alert -> resolve) masing-masing harus menghasilkan baris inspection
-    SENDIRI (inspection_seq naik) - resolve tidak boleh menelan/
-    menggabungkan episode yang berbeda. Alert kedua sengaja diberi skor
-    jauh lebih tinggi supaya menembus suppression lewat emergency override."""
     cleanup_alert_lifecycle.append(scorable_item)
 
     opened_a = _score_and_flag(scorable_item, scorable_item_host_serial_code, 0.5)
@@ -696,8 +712,6 @@ def test_resolve_by_item_host_serial_code_current_berhasil(
 @needs_database
 @needs_models
 def test_resolve_by_item_host_serial_code_historis_ditolak(scorable_item):
-    """Kasus 2 - host_serial_code HISTORIS (bukan cycle aktif) ditolak
-    dengan HostSerialNotCurrent, BUKAN dipakai resolve cycle aktif."""
     stale_host_serial_code = f"STALE-{scorable_item}-00"
 
     with pytest.raises(alert_engine.HostSerialNotCurrent) as excinfo:
@@ -714,8 +728,6 @@ def test_resolve_by_item_host_serial_code_historis_ditolak(scorable_item):
 def test_resolve_by_item_host_serial_code_current_tidak_pengaruhi_item_lain(
     scorable_item, scorable_item_host_serial_code, cleanup_alert_lifecycle
 ):
-    """Kasus 4 - resolve satu item dengan host_serial_code current TIDAK
-    memengaruhi item lain (item lain tidak ikut punya inspection baru)."""
     cleanup_alert_lifecycle.append(scorable_item)
     opened = _score_and_flag(scorable_item, scorable_item_host_serial_code, 0.5)
     assert opened["alert_flagged"] is True

@@ -6,6 +6,7 @@ import pandas as pd
 from partrisk.core import config
 
 _DAY = np.timedelta64(1, "D")
+_DATETIME64_NS = "datetime64[ns]"
 
 
 def _log1p(values: pd.Series) -> pd.Series:
@@ -31,7 +32,7 @@ def _age_band(days: pd.Series) -> pd.Series:
 
 
 def cumulative_support(observations: pd.DataFrame) -> pd.Series:
-    times = observations["observation_on"].to_numpy("datetime64[ns]")
+    times = observations["observation_on"].to_numpy(_DATETIME64_NS)
     support = np.zeros(len(observations), dtype="int64")
     grouped = observations.groupby("item_model_code_clean", sort=False, dropna=False)
     for rows in grouped.indices.values():
@@ -68,14 +69,14 @@ def attach_history(observations: pd.DataFrame, events: pd.DataFrame) -> pd.DataF
     observations = observations.reset_index(drop=True)
     total = len(observations)
     counts = {name: np.zeros(total, dtype="int64") for name in _HISTORY_COUNTS}
-    last_corrective = np.full(total, np.datetime64("NaT"), dtype="datetime64[ns]")
-    observed_at = observations["observation_on"].to_numpy("datetime64[ns]")
+    last_corrective = np.full(total, np.datetime64("NaT"), dtype=_DATETIME64_NS)
+    observed_at = observations["observation_on"].to_numpy(_DATETIME64_NS)
 
     if total and len(events):
         events = events.sort_values(
             ["item_identifier_clean", "created_on"], kind="stable"
         )
-        event_times = events["created_on"].to_numpy("datetime64[ns]")
+        event_times = events["created_on"].to_numpy(_DATETIME64_NS)
         is_corrective = events["wo_type_clean"].eq("CORRECTIVE").to_numpy()
         is_failure = events["is_failure_onset"].fillna(False).to_numpy(dtype=bool)
         is_new_place = _first_occurrence(events)
@@ -162,11 +163,11 @@ def corrective_degradation_trend(landmarks: pd.DataFrame, events: pd.DataFrame) 
         ["item_identifier_clean", "created_on"], kind="stable"
     )
     failure_times_by_item = {
-        item: sub["created_on"].to_numpy("datetime64[ns]")
+        item: sub["created_on"].to_numpy(_DATETIME64_NS)
         for item, sub in failures.groupby("item_identifier_clean", sort=False)
     }
 
-    at = landmarks["observation_on"].to_numpy("datetime64[ns]")
+    at = landmarks["observation_on"].to_numpy(_DATETIME64_NS)
     day = np.timedelta64(1, "D")
 
     rows_by_item = landmarks.groupby("item_identifier_clean", sort=False).indices
@@ -206,11 +207,11 @@ def windowed_corrective_extra(landmarks: pd.DataFrame, events: pd.DataFrame, win
         ["item_identifier_clean", "created_on"], kind="stable"
     )
     times_by_item = {
-        item: sub["created_on"].to_numpy("datetime64[ns]")
+        item: sub["created_on"].to_numpy(_DATETIME64_NS)
         for item, sub in corrective.groupby("item_identifier_clean", sort=False)
     }
 
-    at = landmarks["observation_on"].to_numpy("datetime64[ns]")
+    at = landmarks["observation_on"].to_numpy(_DATETIME64_NS)
     rows_by_item = landmarks.groupby("item_identifier_clean", sort=False).indices
 
     for item, rows in rows_by_item.items():
@@ -279,7 +280,7 @@ def attach_fleet(
     observations: pd.DataFrame, cycles: pd.DataFrame, failures: pd.DataFrame
 ) -> pd.DataFrame:
     observations = observations.reset_index(drop=True)
-    at = observations["observation_on"].to_numpy("datetime64[ns]")
+    at = observations["observation_on"].to_numpy(_DATETIME64_NS)
     window = at - np.timedelta64(config.FLEET_WINDOW_DAYS, "D")
     keys = observations["item_model_code_clean"].fillna(config.UNKNOWN_LABEL)
 
@@ -289,7 +290,7 @@ def attach_fleet(
             usable["item_model_code_clean"].fillna(config.UNKNOWN_LABEL), sort=False
         )
         return {
-            name: np.sort(group[column].to_numpy("datetime64[ns]"))
+            name: np.sort(group[column].to_numpy(_DATETIME64_NS))
             for name, group in grouped
         }
 
@@ -347,7 +348,7 @@ def local_density(
     group_column: str, window_days: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     observations = observations.reset_index(drop=True)
-    at = observations["observation_on"].to_numpy("datetime64[ns]")
+    at = observations["observation_on"].to_numpy(_DATETIME64_NS)
     window = at - np.timedelta64(int(window_days), "D")
     keys = observations[group_column].fillna(config.UNKNOWN_LABEL)
 
@@ -357,7 +358,7 @@ def local_density(
             usable[group_column].fillna(config.UNKNOWN_LABEL), sort=False
         )
         return {
-            name: np.sort(group[time_col].to_numpy("datetime64[ns]"))
+            name: np.sort(group[time_col].to_numpy(_DATETIME64_NS))
             for name, group in grouped
         }
 
@@ -445,8 +446,8 @@ def training_observations(
         & (cycles["installed_on"] < cycles["cycle_end_on"])
     ].reset_index(drop=True)
 
-    installed = cohort["installed_on"].to_numpy("datetime64[ns]")
-    ends = cohort["cycle_end_on"].to_numpy("datetime64[ns]")
+    installed = cohort["installed_on"].to_numpy(_DATETIME64_NS)
+    ends = cohort["cycle_end_on"].to_numpy(_DATETIME64_NS)
     step = np.timedelta64(config.OBSERVATION_STEP_DAYS, "D")
 
     span = ends - installed - np.timedelta64(1, "us")
@@ -459,8 +460,8 @@ def training_observations(
     observations = cohort.iloc[row].reset_index(drop=True)
     observations["observation_on"] = installed[row] + offset * step
 
-    failure = observations["failure_onset_on"].to_numpy("datetime64[ns]")
-    observed = observations["observation_on"].to_numpy("datetime64[ns]")
+    failure = observations["failure_onset_on"].to_numpy(_DATETIME64_NS)
+    observed = observations["observation_on"].to_numpy(_DATETIME64_NS)
     horizon = np.timedelta64(horizon_days, "D")
     observations["target_failure"] = (failure > observed) & (
         failure <= observed + horizon
@@ -498,8 +499,8 @@ def current_observations(cycles: pd.DataFrame, events: pd.DataFrame) -> pd.DataF
 def _finalize_observations(observations: pd.DataFrame) -> pd.DataFrame:
     observations = observations.reset_index(drop=True)
     observations["days_since_installation"] = (
-        observations["observation_on"].to_numpy("datetime64[ns]")
-        - observations["installed_on"].to_numpy("datetime64[ns]")
+        observations["observation_on"].to_numpy(_DATETIME64_NS)
+        - observations["installed_on"].to_numpy(_DATETIME64_NS)
     ) / _DAY
     return observations
 

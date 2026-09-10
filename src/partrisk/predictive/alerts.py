@@ -77,13 +77,24 @@ def _run_succeeded(table_ref: str = "item_prediction") -> str:
     )
 
 
+def _not_superseded(table_ref: str = "item_prediction") -> str:
+    return (
+        f"NOT EXISTS (SELECT 1 FROM predictive.item_prediction newer "
+        f"JOIN predictive.model_run newer_run ON newer_run.run_id = newer.run_id "
+        f"WHERE newer.item_serial_code = {table_ref}.item_serial_code "
+        f"AND newer.scored_at > {table_ref}.scored_at "
+        f"AND newer_run.status = 'SUCCEEDED' AND NOT newer.gate_flagged)"
+    )
+
+
 def get_alert(prediction_id: int) -> dict | None:
-   
+
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT {_ALERT_SELECT_COLUMNS} FROM predictive.item_prediction "
-                f"WHERE prediction_id = %s AND alert_flagged AND {_run_succeeded()}",
+                f"WHERE prediction_id = %s AND alert_flagged AND {_run_succeeded()} "
+                f"AND {_not_superseded()}",
                 (prediction_id,),
             )
             row = cur.fetchone()
@@ -91,12 +102,13 @@ def get_alert(prediction_id: int) -> dict | None:
 
 
 def open_alerts_by_item(item_ids: list[str] | None = None) -> dict[str, dict]:
-    
+
     query = f"""
         SELECT DISTINCT ON (item_serial_code) {_ALERT_SELECT_COLUMNS}
         FROM predictive.item_prediction
         WHERE alert_flagged
           AND {_run_succeeded()}
+          AND {_not_superseded()}
           AND NOT EXISTS (
               SELECT 1 FROM predictive.inspection_history
               WHERE inspection_history.prediction_id = item_prediction.prediction_id
@@ -184,6 +196,7 @@ def _has_open_alert(cur, item_serial_code: str) -> bool:
         SELECT 1 FROM predictive.item_prediction ip
         WHERE ip.item_serial_code = %s AND ip.alert_flagged
           AND {_run_succeeded("ip")}
+          AND {_not_superseded("ip")}
           AND NOT EXISTS (
               SELECT 1 FROM predictive.inspection_history ih
               WHERE ih.prediction_id = ip.prediction_id

@@ -69,7 +69,13 @@ def batch():
 
 @pytest.fixture(scope="session")
 def scorable_item(batch) -> str:
-    return str(batch.frame["item_id"].iloc[0])
+    from partrisk.predictive import alerts as alert_engine
+
+    open_alerts = alert_engine.open_alerts_by_item()
+    for item_id in reversed(batch.frame["item_id"].tolist()):
+        if item_id not in open_alerts:
+            return str(item_id)
+    pytest.skip("Semua PART aktif sedang punya alert open - tidak ada kandidat scorable_item yang aman")
 
 
 @pytest.fixture(scope="session")

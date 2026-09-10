@@ -223,14 +223,14 @@ async def lifespan(app: FastAPI):
         serving.warmup()
         logger.info("Model dimuat: %s", serving.versions())
     except ModelUnavailable as error:
-        logger.error("Model production belum tersedia: %s", error)
+        logger.exception("Model production belum tersedia: %s", error)
 
     if WARMUP_BATCH_ON_STARTUP:
         try:
             scores = serving_batch.score_active_parts()
             logger.info("Batch scoring awal selesai: %d PART aktif", len(scores.frame))
         except Exception as error:  # noqa: BLE001
-            logger.error("Batch scoring awal gagal: %s", error)
+            logger.exception("Batch scoring awal gagal: %s", error)
 
     yield
 

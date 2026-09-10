@@ -146,19 +146,49 @@ def _similarity(left: str, right: str) -> float:
     return round(1.0 - _levenshtein(left_key, right_key) / longest, 4)
 
 
+def _build_exact_index(master_pairs: list[tuple[str | None, str]]) -> dict[str, set[str]]:
+    exact: dict[str, set[str]] = {}
+    for code, name in master_pairs:
+        for key in (code, name):
+            if key:
+                exact.setdefault(key, set()).add(name)
+    return exact
+
+
+def _resolve_canonical(
+    source: str, exact: dict[str, set[str]], alias: dict[str, str], master_names: list[str],
+) -> str | None:
+    if source in exact:
+        names = exact[source]
+        if len(names) == 1:
+            return next(iter(names))
+        return alias.get(source)
+    if source in alias:
+        return alias[source]
+
+    scored = sorted(
+        ((_similarity(source, name), name) for name in master_names),
+        key=lambda item: (-item[0], item[1]),
+    )
+    if not scored:
+        return None
+    best_score, best_name = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else 0.0
+    if (
+        best_score >= config.FUZZY_MIN_SCORE
+        and best_score - second_score >= config.FUZZY_MIN_MARGIN
+    ):
+        return best_name
+    return None
+
+
 def _canonical_map(
     source_values: list[str],
     master_pairs: list[tuple[str | None, str]],
     approved_alias: dict[str, str],
 ) -> dict[str, str]:
     master_names = sorted({name for _, name in master_pairs if name})
-
-    exact: dict[str, set[str]] = {}
-    for code, name in master_pairs:
-        for key in (code, name):
-            if key:
-                exact.setdefault(key, set()).add(name)
-
+    exact = _build_exact_index(master_pairs)
     alias = {
         source.upper(): canonical
         for source, canonical in approved_alias.items()
@@ -167,30 +197,9 @@ def _canonical_map(
 
     mapping: dict[str, str] = {}
     for source in source_values:
-        if source in exact:
-            names = exact[source]
-            if len(names) == 1:
-                mapping[source] = next(iter(names))
-            elif source in alias:
-                mapping[source] = alias[source]
-            continue
-        if source in alias:
-            mapping[source] = alias[source]
-            continue
-
-        scored = sorted(
-            ((_similarity(source, name), name) for name in master_names),
-            key=lambda item: (-item[0], item[1]),
-        )
-        if not scored:
-            continue
-        best_score, best_name = scored[0]
-        second_score = scored[1][0] if len(scored) > 1 else 0.0
-        if (
-            best_score >= config.FUZZY_MIN_SCORE
-            and best_score - second_score >= config.FUZZY_MIN_MARGIN
-        ):
-            mapping[source] = best_name
+        canonical = _resolve_canonical(source, exact, alias, master_names)
+        if canonical is not None:
+            mapping[source] = canonical
     return mapping
 
 

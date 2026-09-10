@@ -286,7 +286,7 @@ def evaluate_incumbent(previous_version: str, dataset: pd.DataFrame, split: str 
 
 def active_part_scores(
     model, calibrator, cycles: pd.DataFrame, events: pd.DataFrame,
-    support_totals: dict[str, int], episodes: pd.DataFrame, fleet: pd.DataFrame,
+    support_totals: dict[str, int], fleet: pd.DataFrame,
     item_type_density: pd.DataFrame,
 ) -> np.ndarray:
     snapshot = feature_builder.current_observations(cycles, events)
@@ -440,12 +440,12 @@ def main() -> int:
     args = parser.parse_args()
 
     dataset, features, support_totals, data_end, events, cycles, episodes = build_dataset()
-    model, calibrator, metrics, raw_test, _val_oof = train_model(dataset, features)
+    model, calibrator, metrics, _, _ = train_model(dataset, features)
     fleet = feature_builder.fleet_snapshot(cycles, episodes, data_end)
     item_type_density = feature_builder.item_type_density_snapshot(cycles, events, episodes, data_end)
     cutoffs, cutoff_basis = choose_cutoffs(
         active_part_scores(
-            model, calibrator, cycles, events, support_totals, episodes, fleet, item_type_density,
+            model, calibrator, cycles, events, support_totals, fleet, item_type_density,
         )
     )
 

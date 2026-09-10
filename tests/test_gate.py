@@ -154,7 +154,8 @@ def test_reliability_table_bentuk_dan_isi():
     table = gate.reliability_table(scores, labels, n_bins=5)
     assert set(table.columns) >= {"mean_predicted", "observed_rate", "n"}
     assert table["n"].sum() == len(scores)
-    assert (table["observed_rate"] >= 0).all() and (table["observed_rate"] <= 1).all()
+    assert (table["observed_rate"] >= 0).all()
+    assert (table["observed_rate"] <= 1).all()
 
 
 def _lifecycle_dataset() -> tuple[pd.DataFrame, np.ndarray]:

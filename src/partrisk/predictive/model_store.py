@@ -25,7 +25,7 @@ def next_version() -> str:
             rows = cur.fetchall()
     existing = [
         int(row[0][1:]) for row in rows
-        if row[0][:1] == "v" and row[0][1:].isdigit()
+        if row[0].startswith("v") and row[0][1:].isdigit()
     ]
     return f"v{max(existing, default=0) + 1}"
 
