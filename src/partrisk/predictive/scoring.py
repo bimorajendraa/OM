@@ -94,13 +94,6 @@ def record_predictions(
     model_version: str,
     scored_at: pd.Timestamp,
 ) -> int:
-    """Tulis satu baris `item_prediction` per PART di `frame`. APPEND-ONLY.
-
-    `alert_flagged` (gate_flagged DAN tidak sedang di-suppress, lihat
-    `alerts.py::compute_alert_flagged()`) dihitung DI DALAM transaksi yang
-    sama dengan INSERT ini - satu-satunya titik di mana sebuah prediction
-    "menjadi alert", menggantikan langkah `evaluate_and_open()` terpisah
-    yang dulu ada."""
     _check_scores_before_persist(frame)
 
     with db.connect() as conn:
@@ -136,10 +129,6 @@ def record_predictions(
 
 
 def run_and_persist() -> dict:
-    """Satu siklus scoring: tutup alert yang cycle-nya sudah berakhir,
-    skor seluruh PART aktif, simpan sebagai model_run + item_prediction
-    baru (`alert_flagged` dihitung sekaligus saat insert, lihat
-    `record_predictions()`)."""
     from partrisk.serving import batch as serving_batch
 
     model_version = None

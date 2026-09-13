@@ -1,8 +1,3 @@
-"""Penyimpanan model artifact (predictive.model_artifact) - menggantikan
-filesystem models/failure/vN/. Schema predictive tetap satu-satunya tempat
-partrisk menulis, konsisten dengan modul predictive/* lainnya.
-"""
-
 from __future__ import annotations
 
 import io
@@ -61,15 +56,9 @@ def save_version(
     fleet: pd.DataFrame,
     metadata: dict,
 ) -> None:
-    """Simpan satu versi model utuh (model + calibrator + fleet snapshot +
-    metadata) sebagai satu baris predictive.model_artifact. APPEND-ONLY -
-    tidak ada UPDATE untuk model_version yang sudah ada."""
     descriptor, tmp_path = tempfile.mkstemp(suffix=".cbm")
     os.close(descriptor)
     try:
-        # CatBoost save_model() cuma bisa menulis ke path file asli, tidak
-        # ke buffer in-memory (diverifikasi) - jadi butuh satu file
-        # sementara yang langsung dibaca lagi jadi bytes lalu dihapus.
         model.save_model(tmp_path)
         with open(tmp_path, "rb") as f:
             model_blob = f.read()
@@ -135,8 +124,6 @@ def load_fleet_snapshot(model_version: str) -> pd.DataFrame:
 
 
 def artifact_size_bytes(model_version: str) -> int:
-    """Total ukuran model+calibrator+fleet (bytes) - pengganti Path.stat()
-    pada file lokal untuk gerbang ukuran artifact (mis. baseline-performance)."""
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(

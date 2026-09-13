@@ -97,6 +97,25 @@ def _resolve_closed_alerts_main() -> int:
     return 0
 
 
+_raw_data_cache_logger = logging.getLogger("refresh-raw-data-cache")
+
+
+def _refresh_raw_data_cache_main() -> int:
+    from partrisk.predictive import raw_data_cache
+
+    started = time.time()
+    try:
+        counts = raw_data_cache.refresh()
+    except Exception:
+        _raw_data_cache_logger.exception("refresh-raw-data-cache gagal")
+        return 1
+    _raw_data_cache_logger.info(
+        "events=%d cycles=%d episodes=%d selesai dalam %.1f detik",
+        counts["events"], counts["cycles"], counts["episodes"], time.time() - started,
+    )
+    return 0
+
+
 _import_model_artifacts_logger = logging.getLogger("import-model-artifacts")
 
 
@@ -829,6 +848,16 @@ def main() -> int:
     )
 
     sub.add_parser(
+        "refresh-raw-data-cache",
+        help="Tarik events/cycles/episodes dari database operasional dan "
+        "simpan ke predictive.raw_*_cache (TRUNCATE + tulis ulang semua) - "
+        "dipakai training lewat build_dataset(use_raw_cache=True), supaya "
+        "eksperimen berulang tidak menembak database operasional tiap kali. "
+        "Dijadwalkan TERPISAH dari jadwal training resmi (lihat "
+        "predictive/raw_data_cache.py).",
+    )
+
+    sub.add_parser(
         "import-model-artifacts",
         help="Migrasi satu kali: pindahkan semua versi model kerusakan dari "
         "models/failure/v*/ ke predictive.model_artifact.",
@@ -875,6 +904,8 @@ def main() -> int:
         return _score_and_persist_main()
     if args.command == "resolve-closed-alerts":
         return _resolve_closed_alerts_main()
+    if args.command == "refresh-raw-data-cache":
+        return _refresh_raw_data_cache_main()
     if args.command == "import-model-artifacts":
         return _import_model_artifacts_main()
     if args.command == "golden-batch":

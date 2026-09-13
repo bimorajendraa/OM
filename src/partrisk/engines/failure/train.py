@@ -18,6 +18,7 @@ from partrisk.core import data_reader
 from partrisk.core import features as feature_builder
 from partrisk.engines.failure import gate
 from partrisk.predictive import model_store
+from partrisk.predictive import raw_data_cache
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -172,10 +173,23 @@ def assign_split(
     return split
 
 
-def build_dataset(horizon_days: int = config.TARGET_HORIZON_DAYS) -> tuple:
+def build_dataset(
+    horizon_days: int = config.TARGET_HORIZON_DAYS, use_raw_cache: bool = False,
+) -> tuple:
     print("[1/5] Membaca event dan siklus pemasangan dari database...")
-    events = data_reader.get_events()
-    cycles = data_reader.get_cycles(horizon_days=horizon_days)
+    if use_raw_cache:
+        if horizon_days != config.TARGET_HORIZON_DAYS:
+            raise ValueError(
+                "use_raw_cache cuma valid dengan horizon_days default "
+                f"({config.TARGET_HORIZON_DAYS}) - predictive.raw_cycles_cache "
+                "dibuat dengan horizon itu (lihat WHY di raw_data_cache.py). "
+                "Panggil tanpa use_raw_cache untuk horizon_days custom."
+            )
+        events = raw_data_cache.read_events()
+        cycles = raw_data_cache.read_cycles()
+    else:
+        events = data_reader.get_events()
+        cycles = data_reader.get_cycles(horizon_days=horizon_days)
     data_end = pd.Timestamp(cycles["dataset_max_event_on"].max())
     print(f"      {len(events):,} event, {len(cycles):,} siklus, data s/d {data_end}")
 
@@ -183,7 +197,7 @@ def build_dataset(horizon_days: int = config.TARGET_HORIZON_DAYS) -> tuple:
     observations = feature_builder.training_observations(cycles, horizon_days=horizon_days)
     observations = feature_builder.attach_history(observations, events)
     observations = feature_builder.attach_degradation_history(observations, cycles, events)
-    episodes = data_reader.get_failure_episodes()
+    episodes = raw_data_cache.read_episodes() if use_raw_cache else data_reader.get_failure_episodes()
     observations = feature_builder.attach_fleet(observations, cycles, episodes)
     observations = feature_builder.attach_item_type_density(observations, events, cycles, episodes)
 
